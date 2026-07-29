@@ -11,6 +11,7 @@ repository = "https://github.com/ebnsina/sahl"
 
 [workspace.dependencies]
 sahl-core = { path = "crates/sahl-core" }
+sahl-fiscal = { path = "crates/sahl-fiscal" }
 sahl-sync = { path = "crates/sahl-sync" }
 sahl-escpos = { path = "crates/sahl-escpos" }
 

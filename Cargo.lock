@@ -3248,6 +3248,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sahl-fiscal"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sahl-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
 name = "sahl-server"
 version = "0.1.0"
 dependencies = [
