@@ -1,0 +1,394 @@
+/*
+ * Sahl design tokens.
+ *
+ * Dense and neutral: hairline borders, white cards on light-grey section bands, one saturated
+ * indigo accent, small radii, uppercase micro-labels, and mono tabular figures for every number.
+ *
+ * Two rules govern everything below.
+ *
+ * 1. **Semantic names only.** Components reference `--color-danger`, never `--color-red-600`.
+ *    That is what makes both the dark mode a POS genuinely needs at a dim counter and any future
+ *    per-tenant theming possible without touching a component.
+ *
+ * 2. **One token set, two densities.** The reference design is ~13px body, which is right for the
+ *    owner dashboard and wrong for a cashier hitting buttons fast on a resistive touchscreen. Rather
+ *    than maintain two designs, the ramp is driven by variables that `[data-density]` overrides.
+ *    Mis-taps at a counter cost money, so `touch` guarantees 44px minimum targets.
+ */
+
+@import 'tailwindcss';
+@import './fonts.css';
+
+/* Dark mode is attribute-driven so the terminal can force it regardless of OS setting — a counter
+   at night is a different environment from the OS's idea of "evening". */
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+/* ---------------------------------------------------------------------------------------------
+ * Density-driven scales
+ *
+ * `@theme inline` generates utilities that reference these raw properties, so `.text-body` really
+ * does re-scale when `[data-density]` changes. Note the asymmetry, verified in a browser: the
+ * custom property Tailwind *emits* for a token is frozen at its `:root` value, so only the
+ * generated utility classes track density. Anything read from a `style` attribute must reference
+ * the `--scale-*` property below directly.
+ * ------------------------------------------------------------------------------------------- */
+
+:root {
+	/* Compact — dashboard, back office, reports. Matches the reference design. */
+	--scale-label: 0.6875rem; /* 11px */
+	--scale-secondary: 0.75rem; /* 12px */
+	--scale-body: 0.8125rem; /* 13px */
+	--scale-md: 0.9375rem; /* 15px */
+	--scale-lg: 1.0625rem; /* 17px */
+	--scale-xl: 1.25rem; /* 20px */
+	--scale-2xl: 1.5rem; /* 24px */
+	--scale-3xl: 1.875rem; /* 30px */
+
+	--scale-row-height: 2rem; /* 32px */
+	--scale-control-height: 2rem;
+	--scale-touch-target: 1.75rem;
+	--scale-gap: 0.5rem;
+}
+
+[data-density='touch'] {
+	/* Terminal sell screen. Everything a cashier touches grows; the information hierarchy does not
+	   change, so the same components serve both. */
+	--scale-label: 0.75rem; /* 12px */
+	--scale-secondary: 0.8125rem; /* 13px */
+	--scale-body: 0.9375rem; /* 15px */
+	--scale-md: 1.0625rem; /* 17px */
+	--scale-lg: 1.25rem; /* 20px */
+	--scale-xl: 1.5rem; /* 24px */
+	--scale-2xl: 1.875rem; /* 30px */
+	--scale-3xl: 2.25rem; /* 36px */
+
+	--scale-row-height: 3rem; /* 48px */
+	--scale-control-height: 2.75rem; /* 44px — the floor, not a suggestion */
+	--scale-touch-target: 2.75rem;
+	--scale-gap: 0.75rem;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Palette — light
+ * ------------------------------------------------------------------------------------------- */
+
+:root {
+	--neutral-0: oklch(1 0 0);
+	--neutral-25: oklch(0.99 0 0);
+	--neutral-50: oklch(0.975 0.001 285);
+	--neutral-100: oklch(0.955 0.002 285);
+	--neutral-200: oklch(0.915 0.003 285);
+	--neutral-300: oklch(0.86 0.004 285);
+	--neutral-400: oklch(0.7 0.006 285);
+	--neutral-500: oklch(0.58 0.008 285);
+	--neutral-600: oklch(0.47 0.009 285);
+	--neutral-700: oklch(0.37 0.009 285);
+	--neutral-800: oklch(0.27 0.008 285);
+	--neutral-900: oklch(0.19 0.007 285);
+	--neutral-950: oklch(0.13 0.006 285);
+
+	--indigo-50: oklch(0.965 0.018 280);
+	--indigo-100: oklch(0.93 0.038 280);
+	--indigo-200: oklch(0.87 0.07 280);
+	--indigo-300: oklch(0.78 0.115 280);
+	--indigo-400: oklch(0.66 0.175 279);
+	--indigo-500: oklch(0.58 0.215 278);
+	--indigo-600: oklch(0.51 0.235 277);
+	--indigo-700: oklch(0.45 0.22 277);
+	--indigo-800: oklch(0.38 0.185 277);
+	--indigo-900: oklch(0.31 0.14 278);
+
+	--red-50: oklch(0.97 0.014 25);
+	--red-100: oklch(0.93 0.035 25);
+	--red-500: oklch(0.63 0.22 27);
+	--red-600: oklch(0.56 0.225 27);
+	--red-700: oklch(0.49 0.2 27);
+
+	--amber-50: oklch(0.975 0.03 90);
+	--amber-100: oklch(0.94 0.07 90);
+	--amber-500: oklch(0.77 0.16 78);
+	--amber-600: oklch(0.68 0.155 66);
+	--amber-700: oklch(0.57 0.14 60);
+
+	--green-50: oklch(0.97 0.03 155);
+	--green-100: oklch(0.93 0.06 155);
+	--green-500: oklch(0.7 0.16 155);
+	--green-600: oklch(0.6 0.145 155);
+	--green-700: oklch(0.5 0.12 155);
+
+	/* Semantic surfaces. The reference look is white cards floating on a light-grey band, with
+	   borders rather than shadows carrying the structure. */
+	--semantic-canvas: var(--neutral-50);
+	--semantic-surface: var(--neutral-0);
+	--semantic-surface-sunken: var(--neutral-100);
+	--semantic-surface-hover: var(--neutral-50);
+	--semantic-border: var(--neutral-200);
+	--semantic-border-strong: var(--neutral-300);
+
+	--semantic-text: var(--neutral-900);
+	--semantic-text-secondary: var(--neutral-600);
+	--semantic-text-muted: var(--neutral-500);
+	--semantic-text-inverted: var(--neutral-0);
+
+	--semantic-primary: var(--indigo-600);
+	--semantic-primary-hover: var(--indigo-700);
+	--semantic-primary-subtle: var(--indigo-50);
+	--semantic-primary-text: var(--indigo-700);
+
+	--semantic-danger: var(--red-600);
+	--semantic-danger-hover: var(--red-700);
+	--semantic-danger-subtle: var(--red-50);
+	--semantic-danger-text: var(--red-700);
+
+	--semantic-warn: var(--amber-600);
+	--semantic-warn-subtle: var(--amber-50);
+	--semantic-warn-text: var(--amber-700);
+
+	--semantic-success: var(--green-600);
+	--semantic-success-subtle: var(--green-50);
+	--semantic-success-text: var(--green-700);
+
+	--semantic-focus: var(--indigo-500);
+
+	/*
+	 * Register-state colours.
+	 *
+	 * These are data, not decoration. A cashier has to read the state of the till in a glance from
+	 * across a counter, and an owner has to spot a voided line in a list of two hundred. Giving
+	 * these dedicated tokens — rather than reaching for "some red" at each call site — is what keeps
+	 * that meaning consistent everywhere it appears.
+	 */
+	--semantic-offline: var(--amber-600);
+	--semantic-offline-subtle: var(--amber-50);
+	--semantic-unsynced: var(--indigo-400);
+	--semantic-unsynced-subtle: var(--indigo-50);
+	--semantic-voided: var(--red-600);
+	--semantic-voided-subtle: var(--red-50);
+	--semantic-low-stock: var(--amber-600);
+	--semantic-negative-stock: var(--red-600);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Palette — dark
+ *
+ * Not an afterthought: a counter at night, and a phone dashboard checked in bed, are both real.
+ * Only the semantic layer is remapped, so no component needs to know dark mode exists.
+ * ------------------------------------------------------------------------------------------- */
+
+[data-theme='dark'] {
+	--semantic-canvas: var(--neutral-950);
+	--semantic-surface: var(--neutral-900);
+	--semantic-surface-sunken: var(--neutral-950);
+	--semantic-surface-hover: var(--neutral-800);
+	--semantic-border: oklch(0.3 0.008 285);
+	--semantic-border-strong: oklch(0.4 0.009 285);
+
+	--semantic-text: var(--neutral-50);
+	--semantic-text-secondary: var(--neutral-400);
+	--semantic-text-muted: var(--neutral-500);
+	--semantic-text-inverted: var(--neutral-950);
+
+	--semantic-primary: var(--indigo-500);
+	--semantic-primary-hover: var(--indigo-400);
+	--semantic-primary-subtle: oklch(0.28 0.09 278);
+	--semantic-primary-text: var(--indigo-300);
+
+	--semantic-danger: var(--red-500);
+	--semantic-danger-hover: oklch(0.68 0.21 27);
+	--semantic-danger-subtle: oklch(0.27 0.08 27);
+	--semantic-danger-text: oklch(0.78 0.13 27);
+
+	--semantic-warn: var(--amber-500);
+	--semantic-warn-subtle: oklch(0.28 0.06 78);
+	--semantic-warn-text: oklch(0.85 0.11 85);
+
+	--semantic-success: var(--green-500);
+	--semantic-success-subtle: oklch(0.26 0.05 155);
+	--semantic-success-text: oklch(0.82 0.12 155);
+
+	--semantic-focus: var(--indigo-400);
+
+	--semantic-offline: var(--amber-500);
+	--semantic-offline-subtle: oklch(0.28 0.06 78);
+	--semantic-unsynced: var(--indigo-400);
+	--semantic-unsynced-subtle: oklch(0.28 0.09 278);
+	--semantic-voided: var(--red-500);
+	--semantic-voided-subtle: oklch(0.27 0.08 27);
+	--semantic-low-stock: var(--amber-500);
+	--semantic-negative-stock: var(--red-500);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * Tailwind theme
+ * ------------------------------------------------------------------------------------------- */
+
+@theme inline {
+	/*
+	 * Script coverage is handled by `unicode-range` on each @font-face, so the browser picks the
+	 * right face per character automatically — a Bangla product name beside a Latin SKU in the same
+	 * line renders correctly with no code doing anything.
+	 */
+	--font-sans:
+		'Mona Sans', 'Tiro Bangla', 'IBM Plex Sans Arabic', system-ui, -apple-system, sans-serif;
+	--font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+	--text-label: var(--scale-label);
+	--text-label--line-height: 1.3;
+	--text-label--letter-spacing: 0.06em;
+	--text-label--font-weight: 600;
+
+	--text-secondary: var(--scale-secondary);
+	--text-secondary--line-height: 1.45;
+
+	--text-body: var(--scale-body);
+	--text-body--line-height: 1.5;
+
+	--text-md: var(--scale-md);
+	--text-md--line-height: 1.45;
+
+	--text-lg: var(--scale-lg);
+	--text-lg--line-height: 1.4;
+
+	--text-xl: var(--scale-xl);
+	--text-xl--line-height: 1.3;
+	--text-xl--letter-spacing: -0.01em;
+
+	--text-2xl: var(--scale-2xl);
+	--text-2xl--line-height: 1.25;
+	--text-2xl--letter-spacing: -0.015em;
+
+	--text-3xl: var(--scale-3xl);
+	--text-3xl--line-height: 1.2;
+	--text-3xl--letter-spacing: -0.02em;
+
+	--color-canvas: var(--semantic-canvas);
+	--color-surface: var(--semantic-surface);
+	--color-surface-sunken: var(--semantic-surface-sunken);
+	--color-surface-hover: var(--semantic-surface-hover);
+	--color-border: var(--semantic-border);
+	--color-border-strong: var(--semantic-border-strong);
+
+	--color-text: var(--semantic-text);
+	--color-text-secondary: var(--semantic-text-secondary);
+	--color-text-muted: var(--semantic-text-muted);
+	--color-text-inverted: var(--semantic-text-inverted);
+
+	--color-primary: var(--semantic-primary);
+	--color-primary-hover: var(--semantic-primary-hover);
+	--color-primary-subtle: var(--semantic-primary-subtle);
+	--color-primary-text: var(--semantic-primary-text);
+
+	--color-danger: var(--semantic-danger);
+	--color-danger-hover: var(--semantic-danger-hover);
+	--color-danger-subtle: var(--semantic-danger-subtle);
+	--color-danger-text: var(--semantic-danger-text);
+
+	--color-warn: var(--semantic-warn);
+	--color-warn-subtle: var(--semantic-warn-subtle);
+	--color-warn-text: var(--semantic-warn-text);
+
+	--color-success: var(--semantic-success);
+	--color-success-subtle: var(--semantic-success-subtle);
+	--color-success-text: var(--semantic-success-text);
+
+	--color-focus: var(--semantic-focus);
+
+	--color-offline: var(--semantic-offline);
+	--color-offline-subtle: var(--semantic-offline-subtle);
+	--color-unsynced: var(--semantic-unsynced);
+	--color-unsynced-subtle: var(--semantic-unsynced-subtle);
+	--color-voided: var(--semantic-voided);
+	--color-voided-subtle: var(--semantic-voided-subtle);
+	--color-low-stock: var(--semantic-low-stock);
+	--color-negative-stock: var(--semantic-negative-stock);
+
+	/*
+	 * Square corners, everywhere. Buttons, inputs, cards, badges — nothing is rounded.
+	 *
+	 * Kept as tokens rather than deleted so the decision stays in one place: if corners are ever
+	 * wanted back, they change here and nowhere else. Structure is carried entirely by hairline
+	 * borders, which sharp corners reinforce.
+	 */
+	--radius-control: 0;
+	--radius-panel: 0;
+}
+
+/*
+ * Deliberately NOT aliased into `@theme`: sizing that must react to density.
+ *
+ * `@theme inline` resolves a variable's value at build time and bakes it into the generated
+ * utilities. For the type ramp that is fine — the utility ends up referencing `var(--scale-body)`,
+ * which still tracks the density override. But the custom property Tailwind *emits* is frozen at
+ * whatever `:root` said, so writing `style="min-height: var(--spacing-control)"` in a component
+ * silently pins it to the compact 32px and the 44px touch target never happens.
+ *
+ * That bug is invisible in a screenshot and fatal at a counter, so the aliases are gone. Components
+ * reference `--scale-control-height` and `--scale-row-height` directly, and those are plain custom
+ * properties that cascade normally.
+ */
+
+/* ---------------------------------------------------------------------------------------------
+ * Base
+ * ------------------------------------------------------------------------------------------- */
+
+@layer base {
+	html {
+		font-family: var(--font-sans);
+		/* Mona Sans ships contextual alternates that materially improve small-size legibility, which
+		   is exactly the size range this UI lives in. */
+		font-feature-settings: 'calt' 1;
+		-webkit-text-size-adjust: 100%;
+	}
+
+	body {
+		background-color: var(--color-canvas);
+		color: var(--color-text);
+		font-size: var(--text-body);
+		line-height: 1.5;
+	}
+
+	/*
+	 * Every number in the product is mono and tabular.
+	 *
+	 * Tabular figures matter more than they look: without them, digits have different widths, so a
+	 * column of prices fails to align and a running total visibly jitters as it updates during a
+	 * transaction. `slashed-zero` disambiguates 0 from O in SKUs and reference numbers.
+	 */
+	.numeric,
+	[data-numeric] {
+		font-family: var(--font-mono);
+		font-variant-numeric: tabular-nums slashed-zero;
+		font-feature-settings:
+			'tnum' 1,
+			'zero' 1;
+	}
+
+	:focus-visible {
+		outline: 2px solid var(--color-focus);
+		outline-offset: 1px;
+	}
+
+	/* Respect a cashier's or owner's motion preference. */
+	@media (prefers-reduced-motion: reduce) {
+		*,
+		*::before,
+		*::after {
+			animation-duration: 0.01ms !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 0.01ms !important;
+		}
+	}
+}
+
+@layer components {
+	/*
+	 * The uppercase micro-label from the reference design — section headers and table captions.
+	 */
+	.label-caps {
+		font-size: var(--text-label);
+		font-weight: 600;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
+		color: var(--color-text-muted);
+	}
+}

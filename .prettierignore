@@ -1,0 +1,7 @@
+.svelte-kit/
+build/
+target/
+node_modules/
+packages/ui/fonts/
+packages/ui/src/fonts.css
+pnpm-lock.yaml

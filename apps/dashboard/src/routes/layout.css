@@ -1,0 +1,5 @@
+@import '@sahl/ui/tokens.css';
+
+/* Scan the shared component library for utility classes too — Tailwind only sees this app's own
+   source by default, so classes used inside @sahl/ui would otherwise be tree-shaken away. */
+@source '../../../../packages/ui/src';

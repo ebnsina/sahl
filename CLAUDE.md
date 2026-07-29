@@ -5,7 +5,7 @@ Offline-first, multi-vertical POS. Rust core shared by terminal and server; Svel
 ## The one rule that matters
 
 **Every calculation touching money, tax, or invoice identity lives in `sahl-core` and nowhere else.**
-TypeScript never computes a total — it *displays* one. The terminal and the server run the same compiled
+TypeScript never computes a total — it _displays_ one. The terminal and the server run the same compiled
 code, so they cannot drift. If you find yourself adding arithmetic to a `.ts` file, stop.
 
 `sahl-core` stays I/O-free and async-free. No `tokio`, no `sqlx`, no filesystem. That is what keeps it
@@ -62,7 +62,7 @@ mistake must be loud and immediate, never a wrong number discovered in a monthly
 ## Errors
 
 Typed errors in Rust. In SvelteKit: `+error.svelte` for 404/500, the `handleError` hook for reporting, and
-a *designed* offline/degraded screen on the terminal — never a stack trace facing a cashier.
+a _designed_ offline/degraded screen on the terminal — never a stack trace facing a cashier.
 
 ## Git
 

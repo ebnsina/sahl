@@ -1,26 +1,26 @@
 {
-  "name": "sahl",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "packageManager": "pnpm@11.17.0",
-  "engines": {
-    "node": ">=24"
-  },
-  "scripts": {
-    "dev:terminal": "pnpm --filter @sahl/terminal dev",
-    "dev:dashboard": "pnpm --filter @sahl/dashboard dev",
-    "build": "pnpm -r build",
-    "check": "pnpm -r check",
-    "lint": "pnpm -r lint",
-    "format": "prettier --write .",
-    "rs:fmt": "cargo fmt --all",
-    "rs:lint": "cargo clippy --workspace --all-targets -- -D warnings",
-    "rs:test": "cargo test --workspace"
-  },
-  "devDependencies": {
-    "prettier": "^3.4.2",
-    "prettier-plugin-svelte": "^3.3.3",
-    "prettier-plugin-tailwindcss": "^0.6.11"
-  }
+	"name": "sahl",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"packageManager": "pnpm@11.17.0",
+	"engines": {
+		"node": ">=24"
+	},
+	"scripts": {
+		"dev:terminal": "pnpm --filter @sahl/terminal dev",
+		"dev:dashboard": "pnpm --filter @sahl/dashboard dev",
+		"build": "pnpm -r build",
+		"check": "pnpm -r check",
+		"lint": "pnpm -r lint",
+		"format": "prettier --write .",
+		"rs:fmt": "cargo fmt --all",
+		"rs:lint": "cargo clippy --workspace --all-targets -- -D warnings",
+		"rs:test": "cargo test --workspace"
+	},
+	"devDependencies": {
+		"prettier": "^3.9.6",
+		"prettier-plugin-svelte": "^4.1.1",
+		"prettier-plugin-tailwindcss": "^0.8.1"
+	}
 }

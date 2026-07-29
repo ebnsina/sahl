@@ -1,0 +1,32 @@
+{
+	"name": "@sahl/ui",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"sideEffects": [
+		"**/*.css"
+	],
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"svelte": "./src/index.ts",
+			"default": "./src/index.ts"
+		},
+		"./tokens.css": "./src/tokens.css",
+		"./fonts.css": "./src/fonts.css",
+		"./fonts/*": "./fonts/*"
+	},
+	"scripts": {
+		"fetch-fonts": "node scripts/fetch-fonts.mjs",
+		"check": "svelte-check --tsconfig ./tsconfig.json",
+		"lint": "prettier --check ."
+	},
+	"devDependencies": {
+		"svelte": "^5.56.1",
+		"svelte-check": "^4.6.0",
+		"typescript": "^6.0.3"
+	},
+	"dependencies": {
+		"@lucide/svelte": "^0.550.0"
+	}
+}
