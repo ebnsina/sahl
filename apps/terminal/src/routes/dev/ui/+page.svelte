@@ -12,7 +12,10 @@
 	 * colour. **Direction** proves the Arabic build works — RTL is designed in from the start here,
 	 * because retrofitting it means auditing every margin in the product.
 	 */
-	import { Badge, Button, Card, Field, Input, Numeric, createFormatters } from '@sahl/ui';
+	import { Badge, Button, Card, Field, Input, Logo, Numeric, createFormatters } from '@sahl/ui';
+	import Check from '@lucide/svelte/icons/check';
+	import Plus from '@lucide/svelte/icons/plus';
+	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import PinPrompt from '$lib/PinPrompt.svelte';
 
 	let showPin = $state(false);
@@ -229,6 +232,41 @@
 					<Badge tone="neutral">Draft</Badge>
 					<Badge tone="primary">15% VAT</Badge>
 					<Badge tone="danger">Refund</Badge>
+				</div>
+			</div>
+		</Card>
+
+		<Card label="Mark">
+			<div class="flex flex-col gap-4">
+				<p class="text-secondary text-text-secondary">
+					A receipt reduced to three strokes. Square corners and one flat accent like everything
+					else — it has to stay legible at 16px in a tab and at 512px in an installer, so there is
+					nothing in it that thin strokes would lose. The app icons are generated from the same four
+					rectangles, so the two cannot drift.
+				</p>
+				<div class="flex items-end gap-6">
+					<Logo size={16} />
+					<Logo size={24} />
+					<Logo size={40} />
+					<Logo size={64} />
+					<Logo size={32} withWordmark />
+				</div>
+			</div>
+		</Card>
+
+		<Card label="Buttons with icons">
+			<div class="flex flex-col gap-3">
+				<p class="text-secondary text-text-secondary">
+					Icons size in em, so they track the density scale with their label instead of staying 16px
+					while a touch-mode button grows around them.
+				</p>
+				<div class="flex flex-wrap items-center gap-2">
+					<Button variant="primary" icon={Plus}>Start a sale</Button>
+					<Button variant="secondary" icon={Check}>Confirm</Button>
+					<Button variant="danger" icon={Trash2}>Void</Button>
+					<Button variant="ghost" icon={Trash2} size="xs">Remove</Button>
+					<Button variant="secondary" icon={Check} iconOnly>Confirm</Button>
+					<Button variant="primary" icon={Check} loading>Saving</Button>
 				</div>
 			</div>
 		</Card>

@@ -177,6 +177,21 @@ export type CloseReason = 'complete' | 'short_shipped' | 'cancelled';
 /** How a supply is treated for VAT. */
 export type TaxTreatment = 'standard' | 'zero_rated' | 'exempt';
 
+/** How this outlet trades. */
+export interface OutletView {
+	outletId: string;
+	name: string;
+	profile: 'retail' | 'cafe' | 'grocery';
+	currency: string;
+	timezone: string;
+	regime: 'none' | 'bd_mushak';
+	taxRegistration: string | null;
+	address: string;
+	configuredAt: number;
+	/** What this profile can do, so a screen need not reimplement the table. */
+	capabilities: string[];
+}
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -334,6 +349,20 @@ export const till = {
 	}) => call<StaffView[]>('enrol_staff', input),
 
 	auditFeed: () => call<AuditView[]>('audit_feed'),
+
+	outletConfig: () => call<OutletView | null>('outlet_config'),
+
+	configureOutlet: (input: {
+		name: string;
+		profile: OutletView['profile'];
+		currency: string;
+		timezone: string;
+		regime: OutletView['regime'];
+		taxRegistration?: string | null;
+		address: string;
+		/** An owner's PIN. Ignored only before anyone is enrolled. */
+		pin: string;
+	}) => call<OutletView | null>('configure_outlet', input),
 
 	orderList: () => call<OrderView[]>('order_list'),
 

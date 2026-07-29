@@ -282,6 +282,9 @@
 			<a href="/staff" class="text-secondary text-text-secondary hover:text-text underline">
 				Staff
 			</a>
+			<a href="/settings" class="text-secondary text-text-secondary hover:text-text underline">
+				Settings
+			</a>
 			<a href="/" class="text-secondary text-text-secondary hover:text-text underline">
 				Sell screen
 			</a>

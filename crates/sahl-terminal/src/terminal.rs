@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 use sahl_core::event::{EventChain, EventEnvelope, EventHeader};
 use sahl_core::inventory::{InventoryBook, InventoryError, InventoryEvent};
 use sahl_core::ledger::{FiscalChain, FiscalEvent, FiscalTip, InvoiceContent};
+use sahl_core::outlet::{OutletConfig, OutletError, OutletEvent};
 use sahl_core::policy::lease::ClaimVerdict;
 use sahl_core::projection::SaleBook;
 use sahl_core::purchasing::{PurchaseError, PurchaseEvent, PurchaseOrder};
@@ -57,6 +58,9 @@ pub enum TerminalError {
 
     #[error("{0}")]
     Fiscal(#[from] sahl_core::ledger::FiscalError),
+
+    #[error("{0}")]
+    Outlet(#[from] OutletError),
 
     #[error("no purchase order {order_id}")]
     UnknownOrder { order_id: Uuid },
@@ -109,6 +113,9 @@ pub struct Terminal {
     /// The fiscal sequence. Separate from the event chain: that one proves the record of what
     /// happened is intact, this one proves the sequence of invoices is.
     fiscal: FiscalChain,
+    /// How this outlet trades. `None` until someone completes setup — a till can ring sales before
+    /// it is configured, it just cannot issue fiscal documents for them.
+    outlet: Option<OutletConfig>,
     /// Several orders are open at once, unlike the single drawer — so a map, not an Option.
     orders: BTreeMap<Uuid, PurchaseOrder>,
     identity: DeviceIdentity,
@@ -148,6 +155,7 @@ impl Terminal {
         let mut staff = Directory::new();
         let mut purchase_events: BTreeMap<Uuid, Vec<PurchaseEvent>> = BTreeMap::new();
         let mut fiscal_tip = FiscalTip::GENESIS;
+        let mut outlet: Option<OutletConfig> = None;
         let mut shift_events: Vec<ShiftEvent> = Vec::new();
         for envelope in &stored {
             // Sale and shift events project separately; anything else belongs to a projection this
@@ -174,6 +182,17 @@ impl Terminal {
                 kind if kind.starts_with("staff.") => {
                     if let Ok(event) = envelope.payload_as::<StaffEvent>() {
                         staff.apply(&event)?;
+                    }
+                }
+                kind if kind.starts_with("outlet.") => {
+                    if let Ok(event) = envelope.payload_as::<OutletEvent>() {
+                        // Last one wins: settings are a full replacement, and these arrive from a
+                        // dashboard that may be hours ahead of a till that was offline. An invalid
+                        // one is skipped rather than refused — better to keep the last good setup
+                        // than to refuse to boot over a bad edit made somewhere else.
+                        if let Ok(config) = event.to_config() {
+                            outlet = Some(config);
+                        }
                     }
                 }
                 kind if kind.starts_with("fiscal.") => {
@@ -213,6 +232,7 @@ impl Terminal {
             stock,
             staff,
             fiscal: FiscalChain::resume(identity.device_id, fiscal_tip),
+            outlet,
             orders: purchase_events
                 .into_iter()
                 .filter_map(|(order_id, events)| {
@@ -445,6 +465,39 @@ impl Terminal {
         self.book = candidate;
         self.fiscal = chain;
         Ok(seal)
+    }
+
+    /// Validate, seal, persist, and project one outlet event.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the settings would not be valid to trade under, or the write fails.
+    pub fn record_outlet(
+        &mut self,
+        event: &OutletEvent,
+        event_id: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<(), TerminalError> {
+        // Validated before it is written, so an outlet can never be left in a state it cannot
+        // issue documents under.
+        let config = event.to_config()?;
+
+        self.seal(event, event_id, occurred_at)?;
+        self.outlet = Some(config);
+        Ok(())
+    }
+
+    /// How this outlet trades, once it has been set up.
+    #[must_use]
+    pub const fn outlet(&self) -> Option<&OutletConfig> {
+        self.outlet.as_ref()
+    }
+
+    /// The regime to issue under, or `none` while the outlet is unconfigured.
+    #[must_use]
+    pub fn regime(&self) -> &'static str {
+        self.outlet
+            .as_ref()
+            .map_or("none", |outlet| outlet.regime.label())
     }
 
     /// Where this device's fiscal sequence has got to.
@@ -2091,5 +2144,149 @@ mod tests {
                 .iter()
                 .any(|group| group.tax_class == TaxClass::ZeroRated)
         );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Outlet setup
+    // ------------------------------------------------------------------------------------------
+
+    fn outlet_settings() -> sahl_core::outlet::OutletSettings {
+        sahl_core::outlet::OutletSettings {
+            name: "Karim Store".to_owned(),
+            profile: sahl_core::outlet::Profile::Retail,
+            currency: BDT,
+            timezone: "Asia/Dhaka".to_owned(),
+            regime: sahl_core::outlet::FiscalRegime::BdMushak,
+            tax_registration: Some("0031234567890".to_owned()),
+            address: "12 Dhanmondi 27, Dhaka".to_owned(),
+        }
+    }
+
+    fn configure(settings: sahl_core::outlet::OutletSettings) -> OutletEvent {
+        OutletEvent::Configured {
+            outlet_id: identity().outlet_id,
+            settings,
+            at: at(0),
+            configured_by: id(0x0E),
+        }
+    }
+
+    #[test]
+    fn an_unconfigured_till_issues_under_no_regime() {
+        // It can still sell. A shop trades before anyone finishes setup, and refusing sales until
+        // a BIN is typed would make the first morning worse than the paperwork.
+        let till = fresh();
+        assert!(till.outlet().is_none());
+        assert_eq!(till.regime(), "none");
+    }
+
+    #[test]
+    fn configuring_the_outlet_changes_the_regime_invoices_are_issued_under() {
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+
+        assert_eq!(till.regime(), "bd_mushak");
+        assert_eq!(
+            till.outlet()
+                .expect("configured")
+                .tax_registration
+                .as_deref(),
+            Some("0031234567890")
+        );
+    }
+
+    #[test]
+    fn a_configuration_that_cannot_trade_is_refused_before_it_is_written() {
+        // A Mushak outlet with no BIN would trade all morning and then be unable to issue a single
+        // valid challan for the day.
+        let mut till = fresh();
+        let unsynced_before = till.unsynced_count().expect("counts");
+
+        let refused = till.record_outlet(
+            &configure(sahl_core::outlet::OutletSettings {
+                tax_registration: None,
+                ..outlet_settings()
+            }),
+            id(50),
+            at(0),
+        );
+
+        assert!(matches!(refused, Err(TerminalError::Outlet(_))));
+        assert!(till.outlet().is_none());
+        assert_eq!(till.unsynced_count().expect("counts"), unsynced_before);
+    }
+
+    #[test]
+    fn the_configuration_survives_a_restart() {
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.regime(), "bd_mushak");
+        assert_eq!(reloaded.outlet().expect("configured").name, "Karim Store");
+    }
+
+    #[test]
+    fn a_later_configuration_replaces_the_earlier_one_whole() {
+        // Settings are a replacement, not a patch: a patch arriving out of order would leave an
+        // outlet in a state nobody chose.
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        till.record_outlet(
+            &OutletEvent::Configured {
+                outlet_id: identity().outlet_id,
+                settings: sahl_core::outlet::OutletSettings {
+                    profile: sahl_core::outlet::Profile::Cafe,
+                    ..outlet_settings()
+                },
+                at: at(10),
+                configured_by: id(0x0E),
+            },
+            id(51),
+            at(10),
+        )
+        .expect("reconfigures");
+
+        let outlet = till.outlet().expect("configured");
+        assert_eq!(outlet.profile, sahl_core::outlet::Profile::Cafe);
+        assert!(outlet.can(sahl_core::outlet::Capability::OpenTickets));
+    }
+
+    #[test]
+    fn a_completed_sale_records_the_configured_regime() {
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        ring_up(&mut till, 0x100, 11_500);
+
+        till.complete_sale(
+            &SaleEvent::Completed {
+                sale_id: id(0x100),
+                total: Money::from_minor(11_500, BDT),
+                change_given: Money::from_minor(0, BDT),
+                at: at(3),
+            },
+            till.regime(),
+            id(CASHIER),
+            at(3),
+        )
+        .expect("completes");
+
+        let stored = till.store.load_all().expect("reads");
+        let issued = stored
+            .iter()
+            .find(|envelope| envelope.kind == "fiscal.invoice_issued")
+            .expect("present")
+            .payload_as::<sahl_core::ledger::FiscalEvent>()
+            .expect("decodes");
+
+        let sahl_core::ledger::FiscalEvent::InvoiceIssued { content, .. } = issued;
+        assert_eq!(content.regime, "bd_mushak", "not the hardcoded none");
     }
 }

@@ -9,6 +9,11 @@
 	 * Every amount rendered arrives as an exact integer from Rust and is formatted by `Intl`. There
 	 * is no arithmetic in this file, and there must never be.
 	 */
+	import Ban from '@lucide/svelte/icons/ban';
+	import Banknote from '@lucide/svelte/icons/banknote';
+	import Check from '@lucide/svelte/icons/check';
+	import Plus from '@lucide/svelte/icons/plus';
+	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import {
 		Badge,
 		Button,
@@ -16,6 +21,7 @@
 		Field,
 		Input,
 		Numeric,
+		Logo,
 		createFormatters,
 		parseMinor
 	} from '@sahl/ui';
@@ -246,7 +252,7 @@
 
 <div data-density="touch" class="bg-canvas text-text flex h-screen flex-col">
 	<header class="border-border bg-surface flex shrink-0 items-center gap-3 border-b px-4 py-2.5">
-		<span class="text-md font-semibold">Sahl</span>
+		<Logo size={22} withWordmark />
 
 		<div class="ms-auto flex items-center gap-2">
 			{#if !available}
@@ -282,6 +288,9 @@
 			</a>
 			<a href="/orders" class="text-secondary text-text-secondary hover:text-text underline">
 				Orders
+			</a>
+			<a href="/settings" class="text-secondary text-text-secondary hover:text-text underline">
+				Settings
 			</a>
 		</div>
 	</header>
@@ -341,7 +350,7 @@
 						{#if !sale}
 							<div class="flex flex-1 flex-col items-center justify-center gap-3 p-6">
 								<p class="text-secondary text-text-muted">No sale in progress.</p>
-								<Button variant="primary" size="lg" onclick={startSale} disabled={busy}>
+								<Button variant="primary" size="lg" icon={Plus} onclick={startSale} disabled={busy}>
 									Start a sale
 								</Button>
 							</div>
@@ -378,6 +387,7 @@
 												<Button
 													variant="ghost"
 													size="xs"
+													icon={Trash2}
 													onclick={() => voidLine(line.id)}
 													disabled={busy}>Void</Button
 												>
@@ -479,9 +489,12 @@
 								{/snippet}
 							</Field>
 							<div class="flex flex-wrap gap-2">
-								<Button variant="secondary" onclick={tenderCash} disabled={busy}>Take cash</Button>
+								<Button variant="secondary" icon={Banknote} onclick={tenderCash} disabled={busy}>
+									Take cash
+								</Button>
 								<Button
 									variant="secondary"
+									icon={Banknote}
 									onclick={tenderExact}
 									disabled={busy || balanceDue <= 0}
 								>
@@ -489,12 +502,14 @@
 								</Button>
 								<Button
 									variant="primary"
+									icon={Check}
 									onclick={complete}
 									disabled={busy || balanceDue > 0 || sale.lines.length === 0}
 								>
 									Complete sale
 								</Button>
-								<Button variant="ghost" onclick={abandon} disabled={busy}>Abandon</Button>
+								<Button variant="ghost" icon={Ban} onclick={abandon} disabled={busy}>Abandon</Button
+								>
 							</div>
 						</div>
 					</Card>

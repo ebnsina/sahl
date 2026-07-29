@@ -26,6 +26,12 @@
 	},
 	"bundle": {
 		"active": false,
-		"targets": "all"
+		"targets": "all",
+		"icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.png"],
+		"publisher": "ebnsina",
+		"copyright": "© 2026 ebnsina",
+		"category": "Business",
+		"shortDescription": "Offline-first point of sale",
+		"longDescription": "Sahl is an offline-first point of sale for retail, café and grocery. The shop keeps selling when the internet does not, and every sale, shift and stock movement is recorded to a hash-chained log that syncs when the connection returns."
 	}
 }

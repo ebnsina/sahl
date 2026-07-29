@@ -128,6 +128,8 @@ pub fn run() {
             commands::receive_against_order,
             commands::close_order,
             commands::order_list,
+            commands::outlet_config,
+            commands::configure_outlet,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");

@@ -18,6 +18,7 @@ use argon2::password_hash::rand_core::OsRng;
 use sahl_core::Timestamp;
 use sahl_core::inventory::{InventoryEvent, IssueReason};
 use sahl_core::money::{Currency, Money, Rate, Rounding};
+use sahl_core::outlet::{FiscalRegime, OutletEvent, OutletSettings, Profile};
 use sahl_core::purchasing::{CloseReason, OrderLine, PurchaseEvent};
 use sahl_core::quantity::Quantity;
 use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
@@ -79,9 +80,10 @@ impl From<TerminalError> for CommandError {
             TerminalError::TicketHeld { .. } => "ticket_held",
             TerminalError::Store(_) => "storage",
             TerminalError::Event(_) => "event",
-            TerminalError::Sale(_) | TerminalError::Shift(_) | TerminalError::Inventory(_) => {
-                "rejected"
-            }
+            TerminalError::Sale(_)
+            | TerminalError::Shift(_)
+            | TerminalError::Inventory(_)
+            | TerminalError::Outlet(_) => "rejected",
             TerminalError::Directory(_) | TerminalError::Purchase(_) | TerminalError::Fiscal(_) => {
                 "rejected"
             }
@@ -423,6 +425,10 @@ pub fn complete_sale(
         message: "the till is in an inconsistent state and must be restarted".to_owned(),
     })?;
 
+    // Read before the mutable borrow. The regime is whatever the outlet is configured as, and
+    // "none" while it is unconfigured — a real deployment, not a placeholder.
+    let regime = terminal.regime();
+
     terminal.complete_sale(
         &SaleEvent::Completed {
             sale_id,
@@ -432,9 +438,7 @@ pub fn complete_sale(
             // clock at the moment of closing, not from the UI.
             at: now(),
         },
-        // Configured per outlet once onboarding lands. Until then every till is unregistered,
-        // which is a real deployment rather than a placeholder — see `sahl_fiscal::noop`.
-        "none",
+        regime,
         cashier_id,
         now(),
     )?;
@@ -1224,5 +1228,168 @@ fn close_reason(reason: &str) -> Result<CloseReason, CommandError> {
             code: "unknown_reason",
             message: format!("{other} is not a reason to close an order"),
         }),
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Outlet setup
+// -------------------------------------------------------------------------------------------
+
+/// How this outlet trades, as the settings screen shows it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutletView {
+    pub outlet_id: Uuid,
+    pub name: String,
+    pub profile: &'static str,
+    pub currency: &'static str,
+    pub timezone: String,
+    pub regime: &'static str,
+    pub tax_registration: Option<String>,
+    pub address: String,
+    pub configured_at: i64,
+    /// What this profile can do, so a screen need not reimplement the table.
+    pub capabilities: Vec<&'static str>,
+}
+
+/// The outlet's configuration, or `None` if setup has not been done.
+#[tauri::command]
+pub fn outlet_config(
+    state: tauri::State<'_, TerminalState>,
+) -> Result<Option<OutletView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal.outlet().map(|outlet| OutletView {
+        outlet_id: outlet.outlet_id,
+        name: outlet.name.clone(),
+        profile: outlet.profile.label(),
+        currency: outlet.currency.code(),
+        timezone: outlet.timezone.clone(),
+        regime: outlet.regime.label(),
+        tax_registration: outlet.tax_registration.clone(),
+        address: outlet.address.clone(),
+        configured_at: outlet.configured_at.millis(),
+        capabilities: outlet
+            .profile
+            .capabilities()
+            .into_iter()
+            .map(capability_label)
+            .collect(),
+    }))
+}
+
+/// Set the outlet up, or change its settings.
+///
+/// A full replacement rather than a patch: a patch that arrives out of order leaves an outlet in a
+/// state nobody chose, and these events reach a till that may have been offline for a week.
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "outlet setup genuinely carries this many independent facts, and grouping them into a               struct would only move the argument list to the TypeScript side"
+)]
+pub fn configure_outlet(
+    state: tauri::State<'_, TerminalState>,
+    name: String,
+    profile: String,
+    currency: String,
+    timezone: String,
+    regime: String,
+    tax_registration: Option<String>,
+    address: String,
+    pin: String,
+) -> Result<Option<OutletView>, CommandError> {
+    let profile = match profile.as_str() {
+        "retail" => Profile::Retail,
+        "cafe" => Profile::Cafe,
+        "grocery" => Profile::Grocery,
+        other => {
+            return Err(CommandError {
+                code: "bad_profile",
+                message: format!("{other} is not a profile"),
+            });
+        }
+    };
+
+    let currency = Currency::from_code(&currency).map_err(|error| CommandError {
+        code: "bad_currency",
+        message: error.to_string(),
+    })?;
+
+    let regime = FiscalRegime::from_label(&regime).map_err(|error| CommandError {
+        code: "bad_regime",
+        message: error.to_string(),
+    })?;
+
+    let outlet_id = {
+        let terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+        terminal.identity().outlet_id
+    };
+
+    // Changing the BIN an outlet trades under is not a cashier's decision. The first setup is
+    // allowed unapproved for the same reason the first staff enrolment is — nobody exists yet.
+    let configured_by = {
+        let terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+        if terminal.staff().is_empty() {
+            Uuid::nil()
+        } else {
+            terminal.approve(Permission::ManageStaff, &pin)?
+        }
+    };
+
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    terminal.record_outlet(
+        &OutletEvent::Configured {
+            outlet_id,
+            settings: OutletSettings {
+                name: name.trim().to_owned(),
+                profile,
+                currency,
+                timezone: timezone.trim().to_owned(),
+                regime,
+                tax_registration: tax_registration.and_then(|value| {
+                    let trimmed = value.trim().to_owned();
+                    (!trimmed.is_empty()).then_some(trimmed)
+                }),
+                address: address.trim().to_owned(),
+            },
+            at: now(),
+            configured_by,
+        },
+        new_id(),
+        now(),
+    )?;
+
+    drop(terminal);
+    outlet_config(state)
+}
+
+const fn capability_label(capability: sahl_core::outlet::Capability) -> &'static str {
+    use sahl_core::outlet::Capability as C;
+    match capability {
+        C::OpenTickets => "open_tickets",
+        C::TableService => "table_service",
+        C::KitchenRouting => "kitchen_routing",
+        C::LineModifiers => "line_modifiers",
+        C::CourseFiring => "course_firing",
+        C::SplitBills => "split_bills",
+        C::WeighedItems => "weighed_items",
+        C::ScaleIntegration => "scale_integration",
+        C::BatchExpiry => "batch_expiry",
+        C::CashDrawer => "cash_drawer",
+        // Capability is #[non_exhaustive]; an unnamed one renders honestly rather than as a guess.
+        _ => "unknown",
     }
 }

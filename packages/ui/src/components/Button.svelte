@@ -1,5 +1,6 @@
 <script lang="ts">
-	import type { Snippet } from 'svelte';
+	import type { IconProps } from '@lucide/svelte';
+	import type { Component, Snippet } from 'svelte';
 
 	type Variant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'link';
 	type Size = 'xs' | 'sm' | 'md' | 'lg';
@@ -13,6 +14,21 @@
 		/** Stretch to the container — tender buttons on the sell screen. */
 		block?: boolean;
 		class?: string;
+		/**
+		 * A Lucide icon component, rendered before the label.
+		 *
+		 * **Use sparingly.** An icon earns its place on an action a cashier repeats at speed, where
+		 * shape recognition beats reading — tender, complete, void. It earns nothing on a
+		 * back-office form read carefully once, where it is noise beside an already-clear label, and
+		 * it costs something when the closest available glyph means the wrong thing: a warning
+		 * triangle on "issue stock" is read before the label is.
+		 *
+		 * Passed as a component rather than a name string so only the icons a screen actually uses
+		 * are bundled — the terminal ships offline and has no business carrying 1,500 unused glyphs.
+		 */
+		icon?: Component<IconProps>;
+		/** Icon-only button. The label still renders, for screen readers. */
+		iconOnly?: boolean;
 		onclick?: (event: MouseEvent) => void;
 		children: Snippet;
 	}
@@ -25,6 +41,8 @@
 		type = 'button',
 		block = false,
 		class: extraClass = '',
+		icon: Icon,
+		iconOnly = false,
 		onclick,
 		children
 	}: Props = $props();
@@ -57,6 +75,14 @@
 		lg: 'text-md px-4 gap-2'
 	};
 
+	/** Square, so an icon-only control still meets the touch target on both axes. */
+	const ICON_ONLY_CLASS: Record<Size, string> = {
+		xs: 'text-secondary px-1.5',
+		sm: 'text-secondary px-2',
+		md: 'text-body px-2.5',
+		lg: 'text-md px-3'
+	};
+
 	let isInert = $derived(disabled || loading);
 </script>
 
@@ -65,7 +91,8 @@
 	class="inline-flex cursor-pointer items-center justify-center rounded-[var(--radius-control)]
 	       font-medium whitespace-nowrap transition-[background-color,border-color,filter]
 	       duration-100 disabled:cursor-not-allowed disabled:opacity-50
-	       {VARIANT_CLASS[variant]} {SIZE_CLASS[size]} {block ? 'w-full' : ''} {extraClass}"
+	       {VARIANT_CLASS[variant]} {iconOnly ? ICON_ONLY_CLASS[size] : SIZE_CLASS[size]}
+	       {block ? 'w-full' : ''} {extraClass}"
 	style={variant === 'link' ? undefined : 'min-height: var(--scale-control-height)'}
 	disabled={isInert}
 	aria-busy={loading}
@@ -88,6 +115,15 @@
 				stroke-linecap="round"
 			/>
 		</svg>
+	{:else if Icon}
+		<!-- `size` in em rather than px so the icon tracks the density scale with the label, instead
+		     of staying 16px while a touch-mode button grows around it. -->
+		<Icon size="1.15em" aria-hidden="true" focusable="false" />
 	{/if}
-	{@render children()}
+
+	{#if iconOnly}
+		<span class="sr-only">{@render children()}</span>
+	{:else}
+		{@render children()}
+	{/if}
 </button>

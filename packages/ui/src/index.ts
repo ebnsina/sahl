@@ -11,6 +11,7 @@ export { default as Button } from './components/Button.svelte';
 export { default as Card } from './components/Card.svelte';
 export { default as Field } from './components/Field.svelte';
 export { default as Input } from './components/Input.svelte';
+export { default as Logo } from './components/Logo.svelte';
 export { default as Numeric } from './components/Numeric.svelte';
 
 export { createFormatters, minorToDecimalString, parseMinor, FormatError } from './lib/format.js';
