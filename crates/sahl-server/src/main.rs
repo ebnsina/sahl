@@ -38,12 +38,16 @@ async fn run() -> Result<(), String> {
         .map_err(|error| format!("database unavailable: {error}"))?;
 
     // `sahl-server migrate` is a separate, privileged deploy step. Normal startup only verifies.
-    if std::env::args().nth(1).as_deref() == Some("migrate") {
-        db::run_migrations(&pool)
-            .await
-            .map_err(|error| format!("migration failed: {error}"))?;
-        tracing::info!("migrations applied");
-        return Ok(());
+    match std::env::args().nth(1).as_deref() {
+        Some("migrate") => {
+            db::run_migrations(&pool)
+                .await
+                .map_err(|error| format!("migration failed: {error}"))?;
+            tracing::info!("migrations applied");
+            return Ok(());
+        }
+        Some("issue-token") => return issue_token(&pool).await,
+        _ => {}
     }
 
     let pending = db::pending_migrations(&pool)
@@ -84,6 +88,70 @@ async fn run() -> Result<(), String> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|error| format!("server error: {error}"))
+}
+
+/// Mint an enrollment token and print it once.
+///
+/// An interim path until owners can issue tokens from the dashboard, which needs staff
+/// authentication that lands in P3. Building half an auth system to avoid a CLI would be the worse
+/// trade, and this is the same code path the dashboard will use.
+///
+/// Usage: `sahl-server issue-token <outlet-id> [ttl-seconds]`
+async fn issue_token(pool: &sqlx::PgPool) -> Result<(), String> {
+    let outlet: uuid::Uuid = std::env::args()
+        .nth(2)
+        .ok_or("usage: sahl-server issue-token <outlet-id> [ttl-seconds]")?
+        .parse()
+        .map_err(|_| "outlet id must be a UUID".to_owned())?;
+
+    let ttl_seconds: i64 = std::env::args()
+        .nth(3)
+        .map_or(Ok(900), |value| value.parse())
+        .map_err(|_| "ttl-seconds must be a number".to_owned())?;
+
+    // The outlet's tenant has to be read before the transaction can be scoped, and the device
+    // lookup already solves exactly this problem for enrollment.
+    let tenant: (uuid::Uuid,) = sqlx::query_as("SELECT tenant_id FROM outlet WHERE id = $1")
+        .bind(outlet)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("could not read the outlet: {error}"))?
+        .ok_or_else(|| format!("no outlet {outlet}"))?;
+
+    let minted = sahl_server::device::mint_token()
+        .map_err(|error| format!("could not mint a token: {error}"))?;
+
+    let mut transaction = db::begin_for_tenant(pool, tenant.0)
+        .await
+        .map_err(|error| format!("could not open a transaction: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO enrollment_token (id, tenant_id, outlet_id, token_hash, expires_at) \
+         VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5))",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant.0)
+    .bind(outlet)
+    .bind(minted.digest.as_slice())
+    .bind(f64::from(i32::try_from(ttl_seconds).unwrap_or(900)))
+    .execute(
+        sqlx::Acquire::acquire(&mut transaction)
+            .await
+            .map_err(|error| format!("could not acquire a connection: {error}"))?,
+    )
+    .await
+    .map_err(|error| format!("could not store the token: {error}"))?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("could not commit: {error}"))?;
+
+    // Printed to stdout and never logged. This is the only moment the plaintext exists — the
+    // database holds a digest, so a lost token is reissued rather than recovered.
+    println!("{}", minted.plaintext);
+    eprintln!("valid for {ttl_seconds}s, single use, for outlet {outlet}");
+    Ok(())
 }
 
 /// Drain in-flight requests on SIGINT rather than dropping a sync batch mid-write.

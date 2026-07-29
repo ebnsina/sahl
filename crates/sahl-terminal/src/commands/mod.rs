@@ -373,6 +373,46 @@ pub struct TillStatus {
     pub open_sales: usize,
 }
 
+/// Live sync state for the header badge.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum SyncView {
+    /// Sync is not configured — a single-till shop that never syncs is a valid deployment.
+    Disabled,
+    UpToDate {
+        unsynced: u64,
+    },
+    Retrying {
+        unsynced: u64,
+        attempts: u32,
+    },
+    /// Needs a person. Kept distinct from `Retrying` so the UI can say so.
+    Stopped {
+        reason: String,
+    },
+}
+
+/// Report sync state, tolerating sync not running at all.
+///
+/// `try_state` rather than `State`: when SAHL_SERVER_URL is unset no handle is managed, and a
+/// command that errored in that case would make a perfectly valid offline-only shop look broken.
+#[tauri::command]
+pub fn sync_status(app: tauri::AppHandle) -> SyncView {
+    use tauri::Manager as _;
+
+    let Some(handle) = app.try_state::<crate::sync::SyncHandle>() else {
+        return SyncView::Disabled;
+    };
+
+    match handle.status() {
+        crate::sync::SyncStatus::UpToDate { unsynced } => SyncView::UpToDate { unsynced },
+        crate::sync::SyncStatus::Retrying { unsynced, attempts } => {
+            SyncView::Retrying { unsynced, attempts }
+        }
+        crate::sync::SyncStatus::Stopped { reason } => SyncView::Stopped { reason },
+    }
+}
+
 #[tauri::command]
 pub fn till_status(state: tauri::State<'_, TerminalState>) -> Result<TillStatus, CommandError> {
     let terminal = state.inner.lock().map_err(|_| CommandError {

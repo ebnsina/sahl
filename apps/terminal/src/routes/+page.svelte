@@ -10,7 +10,14 @@
 	 * is no arithmetic in this file, and there must never be.
 	 */
 	import { Badge, Button, Card, Field, Input, Numeric, createFormatters } from '@sahl/ui';
-	import { asTillError, isTillAvailable, till, type SaleView, type TillStatus } from '$lib/till';
+	import {
+		asTillError,
+		isTillAvailable,
+		till,
+		type SaleView,
+		type SyncView,
+		type TillStatus
+	} from '$lib/till';
 
 	// A stand-in catalogue until the real one lands. Prices are tax-inclusive minor units.
 	const CATALOGUE = [
@@ -34,6 +41,7 @@
 
 	let sale = $state<SaleView | null>(null);
 	let status = $state<TillStatus | null>(null);
+	let sync = $state<SyncView | null>(null);
 	let error = $state<{ code: string; message: string } | null>(null);
 	let busy = $state(false);
 	let cashInput = $state('');
@@ -50,6 +58,7 @@
 			const result = await action();
 			onDone?.(result);
 			status = await till.status();
+			sync = await till.syncStatus();
 		} catch (thrown) {
 			error = asTillError(thrown);
 			if (error.code === 'no_till') available = false;
@@ -181,8 +190,18 @@
 				<!-- The designed degraded state, not a stack trace. A cashier never sees a crash. -->
 				<Badge tone="danger" dot>Till not connected</Badge>
 			{:else if status}
-				{#if status.unsyncedCount > 0}
+				{#if sync?.state === 'stopped'}
+					<!-- Distinct from retrying on purpose: this one needs a person, not patience. -->
+					<Badge tone="danger" dot>Sync stopped — call support</Badge>
+				{:else if sync?.state === 'retrying'}
+					<Badge tone="offline" dot>
+						Offline · {format.integer(sync.unsynced)} waiting
+					</Badge>
+				{:else if status.unsyncedCount > 0}
 					<Badge tone="unsynced" dot>{format.integer(status.unsyncedCount)} unsynced</Badge>
+				{:else if sync?.state === 'disabled'}
+					<!-- No server configured. A single-till shop is a valid deployment, not a fault. -->
+					<Badge tone="neutral">Local only</Badge>
 				{:else}
 					<Badge tone="success" dot>Synced</Badge>
 				{/if}

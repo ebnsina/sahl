@@ -108,6 +108,7 @@ pub fn run() {
             commands::abandon_sale,
             commands::get_sale,
             commands::till_status,
+            commands::sync_status,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");

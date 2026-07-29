@@ -57,6 +57,13 @@ export interface SaleView {
 	needsDrawer: boolean;
 }
 
+/** Live sync state. `disabled` is normal for a shop with no server configured. */
+export type SyncView =
+	| { state: 'disabled' }
+	| { state: 'upToDate'; unsynced: number }
+	| { state: 'retrying'; unsynced: number; attempts: number }
+	| { state: 'stopped'; reason: string };
+
 export interface TillStatus {
 	takingsMinor: number;
 	currency: string;
@@ -134,5 +141,7 @@ export const till = {
 
 	getSale: (saleId: string) => call<SaleView>('get_sale', { saleId }),
 
-	status: () => call<TillStatus>('till_status')
+	status: () => call<TillStatus>('till_status'),
+
+	syncStatus: () => call<SyncView>('sync_status')
 };

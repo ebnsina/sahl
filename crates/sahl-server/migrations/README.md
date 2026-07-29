@@ -50,3 +50,15 @@ Never query tenant data outside `db::begin_for_tenant`. It sets `sahl.tenant_id`
 **transaction-local** setting, so a pooled connection cannot carry one merchant's scope into the
 next request. With the setting unset, policies evaluate `tenant_id = NULL` and return nothing —
 forgetting to scope produces a visibly empty result, never another merchant's rows.
+
+## Issuing enrollment tokens
+
+Until owners can do this from the dashboard — which needs the staff authentication that lands in
+P3 — tokens are issued from the CLI:
+
+```sh
+sahl-server issue-token <outlet-id> [ttl-seconds]   # defaults to 900
+```
+
+The plaintext is printed to stdout **once** and never logged. The database stores only its SHA-256
+digest, so a lost token is reissued rather than recovered.
