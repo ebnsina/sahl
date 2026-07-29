@@ -30,6 +30,7 @@
 
 pub mod event;
 pub mod money;
+pub mod policy;
 pub mod projection;
 pub mod quantity;
 pub mod sale;
