@@ -8,6 +8,9 @@
 
 use std::process::ExitCode;
 
+use argon2::password_hash::SaltString;
+use argon2::password_hash::rand_core::OsRng;
+use sahl_core::staff::{Role, pin};
 use sahl_server::config::Config;
 use sahl_server::db;
 use sahl_server::routes::{AppState, router};
@@ -47,6 +50,7 @@ async fn run() -> Result<(), String> {
             return Ok(());
         }
         Some("issue-token") => return issue_token(&pool).await,
+        Some("add-staff") => return add_staff(&pool).await,
         _ => {}
     }
 
@@ -151,6 +155,91 @@ async fn issue_token(pool: &sqlx::PgPool) -> Result<(), String> {
     // database holds a digest, so a lost token is reissued rather than recovered.
     println!("{}", minted.plaintext);
     eprintln!("valid for {ttl_seconds}s, single use, for outlet {outlet}");
+    Ok(())
+}
+
+/// Create a staff user with a PIN.
+///
+/// The PIN is read from `SAHL_STAFF_PIN` rather than an argument, because an argument is visible in
+/// `ps` and lands in shell history.
+///
+/// Usage: `SAHL_STAFF_PIN=… sahl-server add-staff <outlet-id> <role> <name>`
+async fn add_staff(pool: &sqlx::PgPool) -> Result<(), String> {
+    const USAGE: &str = "usage: SAHL_STAFF_PIN=… sahl-server add-staff <outlet-id> <role> <name>";
+
+    let outlet: uuid::Uuid = std::env::args()
+        .nth(2)
+        .ok_or(USAGE)?
+        .parse()
+        .map_err(|_| "outlet id must be a UUID".to_owned())?;
+
+    let role: Role = match std::env::args().nth(3).ok_or(USAGE)?.as_str() {
+        "owner" => Role::Owner,
+        "manager" => Role::Manager,
+        "cashier" => Role::Cashier,
+        other => {
+            return Err(format!(
+                "unknown role {other:?}; expected owner|manager|cashier"
+            ));
+        }
+    };
+
+    let name = std::env::args().nth(4).ok_or(USAGE)?;
+    if name.trim().is_empty() {
+        return Err("a staff name cannot be blank".to_owned());
+    }
+
+    let secret = std::env::var("SAHL_STAFF_PIN")
+        .map_err(|_| "set SAHL_STAFF_PIN to the staff member's PIN".to_owned())?;
+
+    let salt = SaltString::generate(&mut OsRng);
+    let pin_hash = pin::hash(&secret, &salt).map_err(|error| error.to_string())?;
+
+    let tenant: (uuid::Uuid,) = sqlx::query_as("SELECT tenant_id FROM outlet WHERE id = $1")
+        .bind(outlet)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("could not read the outlet: {error}"))?
+        .ok_or_else(|| format!("no outlet {outlet}"))?;
+
+    // An owner is tenant-wide; a manager or cashier belongs to the outlet they were created for.
+    let scope = (!matches!(role, Role::Owner)).then_some(outlet);
+
+    let id = uuid::Uuid::now_v7();
+    let mut transaction = db::begin_for_tenant(pool, tenant.0)
+        .await
+        .map_err(|error| format!("could not open a transaction: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO app_user (id, tenant_id, outlet_id, name, role, pin_hash) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(id)
+    .bind(tenant.0)
+    .bind(scope)
+    .bind(name.trim())
+    .bind(role.label())
+    .bind(&pin_hash)
+    .execute(
+        sqlx::Acquire::acquire(&mut transaction)
+            .await
+            .map_err(|error| format!("could not acquire a connection: {error}"))?,
+    )
+    .await
+    .map_err(|error| format!("could not store the staff member: {error}"))?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("could not commit: {error}"))?;
+
+    // The id goes to stdout; the PIN is never echoed, logged, or repeated back.
+    println!("{id}");
+    eprintln!(
+        "{} added as {} for outlet {outlet}",
+        name.trim(),
+        role.label()
+    );
     Ok(())
 }
 

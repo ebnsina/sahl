@@ -36,6 +36,7 @@ pub mod projection;
 pub mod quantity;
 pub mod sale;
 pub mod shift;
+pub mod staff;
 pub mod tax;
 pub mod time;
 
