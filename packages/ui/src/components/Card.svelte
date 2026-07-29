@@ -14,11 +14,26 @@
 		/** Remove interior padding — for tables that should meet the border. */
 		flush?: boolean;
 		class?: string;
+		/**
+		 * Classes for the bordered body, not the outer section.
+		 *
+		 * Needed because the body is a separate element: making the section a flex column does not
+		 * reach the content, so a scroll area inside a `flex-1` Card never gets a bounded height and
+		 * grows past the viewport instead of scrolling.
+		 */
+		bodyClass?: string;
 		children: Snippet;
 		actions?: Snippet;
 	}
 
-	let { label, flush = false, class: extraClass = '', children, actions }: Props = $props();
+	let {
+		label,
+		flush = false,
+		class: extraClass = '',
+		bodyClass = '',
+		children,
+		actions
+	}: Props = $props();
 </script>
 
 <section class={extraClass}>
@@ -28,7 +43,11 @@
 			{#if actions}<div class="flex items-center gap-2">{@render actions()}</div>{/if}
 		</header>
 	{/if}
-	<div class="border-border bg-surface rounded-[var(--radius-panel)] border {flush ? '' : 'p-4'}">
+	<div
+		class="border-border bg-surface rounded-[var(--radius-panel)] border {flush
+			? ''
+			: 'p-4'} {bodyClass}"
+	>
 		{@render children()}
 	</div>
 </section>

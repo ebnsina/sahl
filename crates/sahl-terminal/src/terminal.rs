@@ -2009,4 +2009,87 @@ mod tests {
             "three of the sibling's invoices, and this till is still on its own first"
         );
     }
+
+    #[test]
+    fn adding_the_same_item_twice_could_merge_or_split() {
+        // The aggregate allows both — merging is the till's decision, not the domain's, because a
+        // cafe with modifiers legitimately wants two rows for two identical drinks.
+        let mut till = fresh();
+        till.record(&opened(), id(100), at(0)).expect("opens");
+        till.record(&line(48_000), id(101), at(1)).expect("adds");
+
+        let existing = till.sale(id(SALE)).expect("sale").active_lines().count();
+        assert_eq!(existing, 1);
+
+        // Merging is expressed as a quantity change on the line already there.
+        till.record(
+            &SaleEvent::LineQuantityChanged {
+                sale_id: id(SALE),
+                line_id: id(11),
+                quantity: Quantity::from_milli(2_000),
+            },
+            id(102),
+            at(2),
+        )
+        .expect("merges");
+
+        let sale = till.sale(id(SALE)).expect("sale");
+        assert_eq!(sale.active_lines().count(), 1, "one row, not two");
+        assert_eq!(
+            sale.totals().expect("totals").total,
+            Money::from_minor(96_000, BDT),
+            "and the money doubled"
+        );
+    }
+
+    #[test]
+    fn the_three_nil_treatments_stay_distinct_in_the_summary() {
+        // Standard-at-zero, zero-rated and exempt all charge the customer nothing, so no total on
+        // any screen would reveal them being collapsed — but they are three different lines on a
+        // VAT return, and only exempt blocks reclaiming input VAT.
+        let mut till = fresh();
+        till.record(&opened(), id(100), at(0)).expect("opens");
+
+        for (line_id, class) in [
+            (0x21_u128, TaxClass::standard(0)),
+            (0x22, TaxClass::ZeroRated),
+            (0x23, TaxClass::Exempt),
+        ] {
+            till.record(
+                &SaleEvent::LineAdded {
+                    sale_id: id(SALE),
+                    line_id: id(line_id),
+                    product_id: id(line_id),
+                    name: format!("Item {line_id}"),
+                    unit_price: Money::from_minor(9_000, BDT),
+                    quantity: Quantity::ONE,
+                    tax_class: class,
+                },
+                id(line_id + 0x1000),
+                at(1),
+            )
+            .expect("adds");
+        }
+
+        let totals = till.sale(id(SALE)).expect("sale").totals().expect("totals");
+
+        assert_eq!(totals.tax, Money::from_minor(0, BDT), "nobody was charged");
+        assert_eq!(
+            totals.tax_groups.len(),
+            3,
+            "and yet three separate treatments survive to the summary"
+        );
+        assert!(
+            totals
+                .tax_groups
+                .iter()
+                .any(|group| group.tax_class == TaxClass::Exempt)
+        );
+        assert!(
+            totals
+                .tax_groups
+                .iter()
+                .any(|group| group.tax_class == TaxClass::ZeroRated)
+        );
+    }
 }

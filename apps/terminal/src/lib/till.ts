@@ -174,6 +174,9 @@ export interface OrderView {
 /** Why an order stopped short of being fully received. */
 export type CloseReason = 'complete' | 'short_shipped' | 'cancelled';
 
+/** How a supply is treated for VAT. */
+export type TaxTreatment = 'standard' | 'zero_rated' | 'exempt';
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -232,8 +235,14 @@ export const till = {
 		productId: string;
 		name: string;
 		unitPriceMinor: number;
-		quantityMilli: number;
+		/** Only read for `standard`. */
 		taxBasisPoints: number;
+		/**
+		 * Three treatments, not one rate. Zero-rated keeps input VAT reclaimable and exempt does
+		 * not, so a rate of zero cannot stand in for either.
+		 */
+		taxTreatment: TaxTreatment;
+		quantityMilli: number;
 		currency: string;
 	}) => call<SaleView>('add_line', input),
 

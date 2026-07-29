@@ -26,22 +26,63 @@
 		till,
 		type SaleView,
 		type SyncView,
+		type TaxTreatment,
 		type TillStatus
 	} from '$lib/till';
 
 	// A stand-in catalogue until the real one lands. Prices are tax-inclusive minor units.
-	const CATALOGUE = [
+	//
+	// `treatment` is not decoration: exempt and zero-rated both charge nothing and are different
+	// things on a VAT return, so the till records which one rather than inferring it from a rate.
+	const CATALOGUE: Array<{
+		id: string;
+		name: string;
+		minor: number;
+		bp: number;
+		treatment: TaxTreatment;
+	}> = [
 		{
 			id: '00000000-0000-0000-0000-000000000101',
 			name: 'Basmati rice 5kg',
 			minor: 48_000,
-			bp: 1500
+			bp: 1500,
+			treatment: 'standard'
 		},
-		{ id: '00000000-0000-0000-0000-000000000102', name: 'Cooking oil 2L', minor: 34_000, bp: 1500 },
-		{ id: '00000000-0000-0000-0000-000000000103', name: 'Bread', minor: 5_500, bp: 750 },
-		{ id: '00000000-0000-0000-0000-000000000104', name: 'Fresh milk 1L', minor: 9_000, bp: 0 },
-		{ id: '00000000-0000-0000-0000-000000000105', name: 'Lentils 1kg', minor: 14_500, bp: 750 },
-		{ id: '00000000-0000-0000-0000-000000000106', name: 'Tea 400g', minor: 32_000, bp: 1500 }
+		{
+			id: '00000000-0000-0000-0000-000000000102',
+			name: 'Cooking oil 2L',
+			minor: 34_000,
+			bp: 1500,
+			treatment: 'standard'
+		},
+		{
+			id: '00000000-0000-0000-0000-000000000103',
+			name: 'Bread',
+			minor: 5_500,
+			bp: 750,
+			treatment: 'standard'
+		},
+		{
+			id: '00000000-0000-0000-0000-000000000104',
+			name: 'Fresh milk 1L',
+			minor: 9_000,
+			bp: 0,
+			treatment: 'exempt'
+		},
+		{
+			id: '00000000-0000-0000-0000-000000000105',
+			name: 'Lentils 1kg',
+			minor: 14_500,
+			bp: 750,
+			treatment: 'standard'
+		},
+		{
+			id: '00000000-0000-0000-0000-000000000106',
+			name: 'Tea 400g',
+			minor: 32_000,
+			bp: 1500,
+			treatment: 'standard'
+		}
 	];
 
 	const CASHIER = '00000000-0000-0000-0000-0000000000ca';
@@ -111,6 +152,7 @@
 					unitPriceMinor: item.minor,
 					quantityMilli: 1000,
 					taxBasisPoints: item.bp,
+					taxTreatment: item.treatment,
 					currency: 'BDT'
 				}),
 			(result) => (sale = result)
@@ -276,8 +318,10 @@
 						>
 							<span class="text-body font-medium">{item.name}</span>
 							<Numeric value={format.money(item.minor)} align="start" class="text-secondary" />
-							{#if item.bp === 0}
+							{#if item.treatment === 'exempt'}
 								<Badge tone="neutral">Exempt</Badge>
+							{:else if item.treatment === 'zero_rated'}
+								<Badge tone="neutral">Zero-rated</Badge>
 							{:else}
 								<Badge tone="neutral">{format.percent(item.bp)} VAT</Badge>
 							{/if}
@@ -287,7 +331,12 @@
 			</Card>
 
 			<div class="flex min-h-0 flex-col gap-3">
-				<Card label="Sale" flush class="flex min-h-0 flex-1 flex-col">
+				<Card
+					label="Sale"
+					flush
+					class="flex min-h-0 flex-1 flex-col"
+					bodyClass="flex min-h-0 flex-1 flex-col overflow-hidden"
+				>
 					<div class="flex min-h-0 flex-1 flex-col">
 						{#if !sale}
 							<div class="flex flex-1 flex-col items-center justify-center gap-3 p-6">

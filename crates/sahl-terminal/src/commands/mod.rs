@@ -175,12 +175,60 @@ pub fn add_line(
     unit_price_minor: i64,
     quantity_milli: i64,
     tax_basis_points: i32,
+    // `standard`, `zero_rated`, or `exempt`.
+    tax_treatment: String,
     currency: String,
 ) -> CommandResult {
     let currency = Currency::from_code(&currency).map_err(|error| CommandError {
         code: "bad_currency",
         message: error.to_string(),
     })?;
+
+    let unit_price = Money::from_minor(unit_price_minor, currency);
+    let quantity = Quantity::from_milli(quantity_milli);
+    let tax_class = tax_class(&tax_treatment, tax_basis_points)?;
+
+    // Tapping the same item twice should read as "two of those", not two identical rows a cashier
+    // has to scroll past. Matched on everything that makes a line the same supply — a different
+    // price or tax treatment is a different line even for the same product.
+    //
+    // The addition happens here rather than in the webview because it is arithmetic on a quantity,
+    // and quantities are the same kind of exact integer as money.
+    let existing = {
+        let terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+
+        terminal.sale(sale_id)?.active_lines().find_map(|line| {
+            let same_supply = line.product_id == product_id
+                && line.unit_price == unit_price
+                && line.tax_class == tax_class
+                // A discounted line keeps its own row: merging would silently spread one line's
+                // reduction across units that were never discounted.
+                && matches!(line.discount, Discount::None);
+
+            same_supply.then_some((line.id, line.quantity))
+        })
+    };
+
+    if let Some((line_id, current)) = existing {
+        let merged = current
+            .checked_add(quantity)
+            .map_err(|error| CommandError {
+                code: "rejected",
+                message: error.to_string(),
+            })?;
+
+        return apply(
+            &state,
+            &SaleEvent::LineQuantityChanged {
+                sale_id,
+                line_id,
+                quantity: merged,
+            },
+        );
+    }
 
     apply(
         &state,
@@ -189,9 +237,9 @@ pub fn add_line(
             line_id: new_id(),
             product_id,
             name,
-            unit_price: Money::from_minor(unit_price_minor, currency),
-            quantity: Quantity::from_milli(quantity_milli),
-            tax_class: TaxClass::standard(tax_basis_points),
+            unit_price,
+            quantity,
+            tax_class,
         },
     )
 }
@@ -629,6 +677,24 @@ pub fn close_shift(
             )
             .map(|_| ())
     })
+}
+
+/// Map the UI's tax treatment onto the domain enum.
+///
+/// Three treatments, not one rate. Standard-at-zero, zero-rated and exempt all charge the customer
+/// nothing and are three different things on a VAT return: zero-rated keeps input VAT reclaimable,
+/// exempt does not, and a rate of zero on a standard supply is neither. Collapsing them into a rate
+/// makes the return wrong in a way no total on any screen would reveal.
+fn tax_class(treatment: &str, basis_points: i32) -> Result<TaxClass, CommandError> {
+    match treatment {
+        "standard" => Ok(TaxClass::standard(basis_points)),
+        "zero_rated" => Ok(TaxClass::ZeroRated),
+        "exempt" => Ok(TaxClass::Exempt),
+        other => Err(CommandError {
+            code: "bad_tax_class",
+            message: format!("{other} is not a tax treatment"),
+        }),
+    }
 }
 
 /// Map the UI's reason string onto the domain enum.

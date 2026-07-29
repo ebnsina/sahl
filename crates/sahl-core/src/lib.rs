@@ -32,6 +32,7 @@ pub mod event;
 pub mod inventory;
 pub mod ledger;
 pub mod money;
+pub mod outlet;
 pub mod policy;
 pub mod projection;
 pub mod purchasing;
