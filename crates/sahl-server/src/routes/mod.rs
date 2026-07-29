@@ -1,6 +1,7 @@
 //! HTTP surface.
 
 pub mod auth;
+pub mod enroll;
 pub mod sync;
 
 use axum::Router;
@@ -18,6 +19,7 @@ pub struct AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route(enroll::ENROLL_PATH, post(enroll::enroll))
         .route(sync::PUSH_PATH, post(sync::push))
         .route(sync::PULL_PATH, get(sync::pull))
         .with_state(state)

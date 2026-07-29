@@ -82,6 +82,7 @@ jobs:
           -- device_tenant is REVOKEd from PUBLIC by its migration, so the runtime role needs an
           -- explicit grant. Without it every request fails authentication.
           GRANT EXECUTE ON FUNCTION device_tenant(UUID) TO sahl_app;
+          GRANT EXECUTE ON FUNCTION enrollment_token_for_digest(BYTEA) TO sahl_app;
           SQL
 
       # Includes the property suites (money allocation laws, VAT invariants, chain-integrity
@@ -143,6 +144,7 @@ jobs:
           -- device_tenant is REVOKEd from PUBLIC by its migration, so the runtime role needs an
           -- explicit grant. Without it every request fails authentication.
           GRANT EXECUTE ON FUNCTION device_tenant(UUID) TO sahl_app;
+          GRANT EXECUTE ON FUNCTION enrollment_token_for_digest(BYTEA) TO sahl_app;
           SQL
 
       - name: Seed two merchants

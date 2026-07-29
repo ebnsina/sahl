@@ -38,6 +38,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sahl_app;
 -- must run unscoped. Its migration REVOKEs it from PUBLIC, so the runtime role needs this grant
 -- explicitly. Without it every signed request fails authentication with an opaque 401.
 GRANT EXECUTE ON FUNCTION device_tenant(UUID) TO sahl_app;
+GRANT EXECUTE ON FUNCTION enrollment_token_for_digest(BYTEA) TO sahl_app;
 ```
 
 Migrations themselves need DDL rights, so run them as the owning role and let the server connect as

@@ -20,6 +20,7 @@
 )]
 
 pub mod commands;
+pub mod enrollment;
 pub mod store;
 pub mod sync;
 pub mod terminal;
