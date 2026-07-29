@@ -55,20 +55,46 @@ pub fn run() {
                 .map_err(|error| format!("no writable data directory: {error}"))?;
             std::fs::create_dir_all(&data_dir)?;
 
-            // TODO(P2): read the enrolled identity from the keychain once enrollment is wired.
-            let identity = DeviceIdentity {
-                tenant_id: uuid::Uuid::nil(),
-                outlet_id: uuid::Uuid::nil(),
-                device_id: uuid::Uuid::nil(),
+            // An un-enrolled till still opens — the sell screen shows an enrollment prompt rather
+            // than a crash — but it gets no identity and no sync until a token is redeemed.
+            let credentials = enrollment::load(&data_dir)
+                .map_err(|error| format!("device credentials are unreadable: {error}"))?;
+
+            let Some(credentials) = credentials else {
+                eprintln!("this till is not enrolled; redeem an enrollment token to start trading");
+                return Ok(());
             };
 
+            let identity = credentials.identity;
             let store = EventStore::open(&data_dir.join("till.db"), identity.device_id)
                 .map_err(|error| format!("cannot open the local event log: {error}"))?;
 
             let terminal = Terminal::load(store, identity)
                 .map_err(|error| format!("the local event log is unusable: {error}"))?;
 
-            tauri::Manager::manage(app, TerminalState::new(terminal));
+            let shared = std::sync::Arc::new(std::sync::Mutex::new(terminal));
+
+            // Sync runs only when a server is configured. A shop with no SAHL_SERVER_URL is a
+            // perfectly valid single-till deployment that simply never syncs.
+            if let Ok(base_url) = std::env::var("SAHL_SERVER_URL") {
+                match credentials.signing_key() {
+                    Ok(key) => match sync::HttpTransport::new(base_url, identity.device_id, key) {
+                        Ok(transport) => {
+                            // Seed the jitter from the device id so a shop's tills do not retry in
+                            // lockstep after an area outage. Truncating to 64 bits is fine — this
+                            // only needs to differ between devices, not to be unguessable.
+                            let (seed, _) = identity.device_id.as_u64_pair();
+                            let handle =
+                                sync::spawn(std::sync::Arc::clone(&shared), transport, seed);
+                            tauri::Manager::manage(app, handle);
+                        }
+                        Err(error) => eprintln!("sync disabled: {error}"),
+                    },
+                    Err(error) => eprintln!("sync disabled: {error}"),
+                }
+            }
+
+            tauri::Manager::manage(app, TerminalState::from_shared(shared));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

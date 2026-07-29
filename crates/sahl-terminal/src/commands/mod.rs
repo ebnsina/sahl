@@ -30,15 +30,22 @@ pub use view::{LineView, SaleView, TaxGroupView, TenderView};
 /// when the thing being guarded is a merchant's money.
 #[derive(Debug)]
 pub struct TerminalState {
-    inner: Mutex<Terminal>,
+    /// Shared with the background sync thread, which takes the lock only for a round.
+    inner: std::sync::Arc<Mutex<Terminal>>,
 }
 
 impl TerminalState {
     #[must_use]
-    pub const fn new(terminal: Terminal) -> Self {
+    pub fn new(terminal: Terminal) -> Self {
         Self {
-            inner: Mutex::new(terminal),
+            inner: std::sync::Arc::new(Mutex::new(terminal)),
         }
+    }
+
+    /// Wrap a till already shared with the sync thread.
+    #[must_use]
+    pub const fn from_shared(inner: std::sync::Arc<Mutex<Terminal>>) -> Self {
+        Self { inner }
     }
 }
 

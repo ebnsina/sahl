@@ -128,6 +128,35 @@ impl Terminal {
         Ok(envelope)
     }
 
+    /// Run one sync round against this till's store.
+    ///
+    /// Rebuilds the projection when events arrive from a sibling — a second cashier's sales change
+    /// what this screen should show, and a stale projection is how two tills in one shop start
+    /// disagreeing about the day.
+    ///
+    /// # Errors
+    /// [`crate::sync::SyncClientError`] on refusal, storage failure, or tip disagreement.
+    pub fn sync(
+        &mut self,
+        transport: &mut impl crate::sync::Transport,
+    ) -> Result<crate::sync::SyncOutcome, crate::sync::SyncClientError> {
+        let outcome = crate::sync::sync_once(&mut self.store, transport)?;
+
+        if outcome.pulled > 0 {
+            let mut rebuilt = SaleBook::new();
+            for envelope in &self.store.load_projection_input()? {
+                if let Ok(event) = envelope.payload_as::<SaleEvent>() {
+                    // A sibling's history may reach us mid-sale, so a partial ticket is expected
+                    // rather than corrupt; skip what does not apply and keep the rest.
+                    rebuilt.apply(&event).ok();
+                }
+            }
+            self.book = rebuilt;
+        }
+
+        Ok(outcome)
+    }
+
     /// Split into store and projection, so the sync loop can drive the store directly.
     ///
     /// Sync needs `&mut EventStore` while the till holds it; handing the parts over is simpler and
