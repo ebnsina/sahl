@@ -28,6 +28,7 @@
     )
 )]
 
+pub mod catalogue;
 pub mod event;
 pub mod inventory;
 pub mod ledger;

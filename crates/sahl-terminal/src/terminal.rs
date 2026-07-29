@@ -14,6 +14,7 @@
 
 use std::collections::BTreeMap;
 
+use sahl_core::catalogue::{Catalogue, CatalogueError, CatalogueEvent};
 use sahl_core::event::{EventChain, EventEnvelope, EventHeader};
 use sahl_core::inventory::{InventoryBook, InventoryError, InventoryEvent};
 use sahl_core::ledger::{FiscalChain, FiscalEvent, FiscalTip, InvoiceContent};
@@ -61,6 +62,9 @@ pub enum TerminalError {
 
     #[error("{0}")]
     Outlet(#[from] OutletError),
+
+    #[error("{0}")]
+    Catalogue(#[from] CatalogueError),
 
     #[error("{0}")]
     FiscalDocument(#[from] sahl_fiscal::FiscalError),
@@ -116,6 +120,7 @@ pub struct Terminal {
     shift: Option<Shift>,
     stock: InventoryBook,
     staff: Directory,
+    catalogue: Catalogue,
     /// The fiscal sequence. Separate from the event chain: that one proves the record of what
     /// happened is intact, this one proves the sequence of invoices is.
     fiscal: FiscalChain,
@@ -159,6 +164,7 @@ impl Terminal {
         let mut book = SaleBook::new();
         let mut stock = InventoryBook::new();
         let mut staff = Directory::new();
+        let mut catalogue = Catalogue::new();
         let mut purchase_events: BTreeMap<Uuid, Vec<PurchaseEvent>> = BTreeMap::new();
         let mut fiscal_tip = FiscalTip::GENESIS;
         let mut outlet: Option<OutletConfig> = None;
@@ -183,6 +189,14 @@ impl Terminal {
                 kind if kind.starts_with("inventory.") => {
                     if let Ok(event) = envelope.payload_as::<InventoryEvent>() {
                         stock.apply(&event)?;
+                    }
+                }
+                kind if kind.starts_with("catalogue.") => {
+                    if let Ok(event) = envelope.payload_as::<CatalogueEvent>() {
+                        // A sibling's catalogue history can arrive out of order relative to this
+                        // device's, so a duplicate or an edit to something not yet seen is expected
+                        // rather than corrupt — the same posture the sale projection takes.
+                        catalogue.apply(&event).ok();
                     }
                 }
                 kind if kind.starts_with("staff.") => {
@@ -237,6 +251,7 @@ impl Terminal {
             shift: latest_open_shift(&shift_events)?,
             stock,
             staff,
+            catalogue,
             fiscal: FiscalChain::resume(identity.device_id, fiscal_tip),
             outlet,
             orders: purchase_events
@@ -546,10 +561,13 @@ impl Terminal {
                 .active_lines()
                 .map(|line| FiscalLine {
                     description: line.name.clone(),
-                    // No unit on a catalogue line yet, so every supply is counted in pieces. Wrong
-                    // for anything weighed, and a real column on the form — it moves when the
-                    // catalogue does.
-                    unit: "pcs".to_owned(),
+                    // The Mushak "Unit of Supply" column. Taken from the catalogue, and falling
+                    // back to pieces only for a product this device has never seen — which is a
+                    // sibling's sale arriving before its catalogue entry, not a normal sale.
+                    unit: self.catalogue.get(line.product_id).map_or_else(
+                        || "pcs".to_owned(),
+                        |product| product.unit.label().to_owned(),
+                    ),
                     quantity_milli: line.quantity.milli(),
                 })
                 .collect(),
@@ -805,6 +823,30 @@ impl Terminal {
         let mut entries = sahl_core::staff::from_sales(&sales);
         entries.extend(sahl_core::staff::from_shifts(&shifts));
         Ok(entries)
+    }
+
+    /// Validate, seal, persist, and project one catalogue event.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the event is invalid for the current state or cannot be persisted.
+    pub fn record_catalogue(
+        &mut self,
+        event: &CatalogueEvent,
+        event_id: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<(), TerminalError> {
+        let mut candidate = self.catalogue.clone();
+        candidate.apply(event)?;
+
+        self.seal(event, event_id, occurred_at)?;
+        self.catalogue = candidate;
+        Ok(())
+    }
+
+    /// What this shop sells.
+    #[must_use]
+    pub const fn catalogue(&self) -> &Catalogue {
+        &self.catalogue
     }
 
     /// Who works here.
@@ -2579,5 +2621,156 @@ mod tests {
             panic!("expected a Mushak");
         };
         assert_eq!(challan.invoice_number, "1");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The catalogue
+    // ------------------------------------------------------------------------------------------
+
+    fn product_details(
+        name: &str,
+        minor: i64,
+        unit: sahl_core::catalogue::Unit,
+    ) -> sahl_core::catalogue::ProductDetails {
+        sahl_core::catalogue::ProductDetails {
+            name: name.to_owned(),
+            sku: None,
+            barcodes: vec!["8901".to_owned()],
+            price: Money::from_minor(minor, BDT),
+            unit,
+            tax_class: TaxClass::standard(1500),
+            category: Some("Staples".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_product_survives_a_restart() {
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_catalogue(
+            &sahl_core::catalogue::CatalogueEvent::ProductAdded {
+                product_id: id(0x101),
+                details: product_details(
+                    "Rice, loose",
+                    4_600,
+                    sahl_core::catalogue::Unit::Kilogram,
+                ),
+                at: at(0),
+                added_by: id(0x0E),
+            },
+            id(60),
+            at(0),
+        )
+        .expect("adds");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.catalogue().sellable().len(), 1);
+        assert_eq!(
+            reloaded.catalogue().by_barcode("8901").expect("found").name,
+            "Rice, loose"
+        );
+    }
+
+    #[test]
+    fn the_challan_takes_its_unit_of_supply_from_the_catalogue() {
+        // The reason the catalogue had to exist before a challan could be right: every line printed
+        // "pcs" regardless, and Unit of Supply is a column on the form.
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        till.record_catalogue(
+            &sahl_core::catalogue::CatalogueEvent::ProductAdded {
+                product_id: id(12),
+                details: product_details(
+                    "Rice, loose",
+                    4_600,
+                    sahl_core::catalogue::Unit::Kilogram,
+                ),
+                at: at(0),
+                added_by: id(0x0E),
+            },
+            id(60),
+            at(0),
+        )
+        .expect("adds");
+
+        // `ring_up` uses product id 12, matching the catalogue entry above.
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        let sahl_fiscal::Document::BdMushak63(challan) =
+            till.fiscal_document(id(0x100)).expect("builds")
+        else {
+            panic!("expected a Mushak");
+        };
+        assert_eq!(challan.lines[0].unit, "kg", "not the hardcoded pcs");
+    }
+
+    #[test]
+    fn a_line_for_a_product_this_device_has_never_seen_still_prints() {
+        // A sibling's sale can arrive before its catalogue entry. Falling back to pieces is wrong
+        // for a weighed good, but refusing to print the challan at all would be worse.
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        let sahl_fiscal::Document::BdMushak63(challan) =
+            till.fiscal_document(id(0x100)).expect("builds")
+        else {
+            panic!("expected a Mushak");
+        };
+        assert_eq!(challan.lines[0].unit, "pcs");
+    }
+
+    #[test]
+    fn a_catalogue_edit_does_not_rewrite_what_a_customer_already_paid() {
+        // The whole reason last-writer-wins is safe for catalogue edits: the sale line snapshots
+        // its price, so a later price rise cannot change a settled sale.
+        let mut till = fresh();
+        till.record_catalogue(
+            &sahl_core::catalogue::CatalogueEvent::ProductAdded {
+                product_id: id(12),
+                details: product_details("Rice 5kg", 48_000, sahl_core::catalogue::Unit::Piece),
+                at: at(0),
+                added_by: id(0x0E),
+            },
+            id(60),
+            at(0),
+        )
+        .expect("adds");
+
+        ring_up(&mut till, 0x100, 48_000);
+        settle(&mut till, 0x100, 48_000);
+
+        till.record_catalogue(
+            &sahl_core::catalogue::CatalogueEvent::ProductUpdated {
+                product_id: id(12),
+                details: product_details("Rice 5kg", 52_000, sahl_core::catalogue::Unit::Piece),
+                at: at(20),
+                updated_by: id(0x0E),
+            },
+            id(61),
+            at(20),
+        )
+        .expect("updates");
+
+        assert_eq!(
+            till.sale(id(0x100))
+                .expect("sale")
+                .totals()
+                .expect("totals")
+                .total,
+            Money::from_minor(48_000, BDT),
+            "the settled sale is untouched"
+        );
+        assert_eq!(
+            till.catalogue().get(id(12)).expect("present").price,
+            Money::from_minor(52_000, BDT),
+            "while the catalogue moved on"
+        );
     }
 }

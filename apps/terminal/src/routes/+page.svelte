@@ -35,64 +35,12 @@
 		type DocumentView,
 		type PrintOutcome,
 		type SyncView,
-		type TaxTreatment,
+		type ProductView,
 		type TillStatus
 	} from '$lib/till';
 
-	// A stand-in catalogue until the real one lands. Prices are tax-inclusive minor units.
-	//
-	// `treatment` is not decoration: exempt and zero-rated both charge nothing and are different
-	// things on a VAT return, so the till records which one rather than inferring it from a rate.
-	const CATALOGUE: Array<{
-		id: string;
-		name: string;
-		minor: number;
-		bp: number;
-		treatment: TaxTreatment;
-	}> = [
-		{
-			id: '00000000-0000-0000-0000-000000000101',
-			name: 'Basmati rice 5kg',
-			minor: 48_000,
-			bp: 1500,
-			treatment: 'standard'
-		},
-		{
-			id: '00000000-0000-0000-0000-000000000102',
-			name: 'Cooking oil 2L',
-			minor: 34_000,
-			bp: 1500,
-			treatment: 'standard'
-		},
-		{
-			id: '00000000-0000-0000-0000-000000000103',
-			name: 'Bread',
-			minor: 5_500,
-			bp: 750,
-			treatment: 'standard'
-		},
-		{
-			id: '00000000-0000-0000-0000-000000000104',
-			name: 'Fresh milk 1L',
-			minor: 9_000,
-			bp: 0,
-			treatment: 'exempt'
-		},
-		{
-			id: '00000000-0000-0000-0000-000000000105',
-			name: 'Lentils 1kg',
-			minor: 14_500,
-			bp: 750,
-			treatment: 'standard'
-		},
-		{
-			id: '00000000-0000-0000-0000-000000000106',
-			name: 'Tea 400g',
-			minor: 32_000,
-			bp: 1500,
-			treatment: 'standard'
-		}
-	];
+	/** The real catalogue, from the till. Empty until someone adds a product. */
+	let catalogue = $state<ProductView[]>([]);
 
 	const CASHIER = '00000000-0000-0000-0000-0000000000ca';
 
@@ -143,6 +91,10 @@
 				(result) => (status = result)
 			);
 			void till.printerConfigured().then((configured) => (hasPrinter = configured));
+			void run(
+				() => till.sellableProducts(),
+				(result) => (catalogue = result)
+			);
 		}
 	});
 
@@ -159,7 +111,7 @@
 		);
 	}
 
-	function addItem(item: (typeof CATALOGUE)[number]) {
+	function addItem(item: ProductView) {
 		const current = sale;
 		if (!current) return;
 		void run(
@@ -168,10 +120,12 @@
 					saleId: current.id,
 					productId: item.id,
 					name: item.name,
-					unitPriceMinor: item.minor,
+					unitPriceMinor: item.priceMinor,
+					// One unit per tap. A divisible product still needs a real quantity, which is what
+					// a scale or a keypad will supply — tapping it is not a weighing.
 					quantityMilli: 1000,
-					taxBasisPoints: item.bp,
-					taxTreatment: item.treatment,
+					taxBasisPoints: item.taxBasisPoints,
+					taxTreatment: item.taxTreatment,
 					currency: 'BDT'
 				}),
 			(result) => (sale = result)
@@ -329,6 +283,9 @@
 			<a href="/stock" class="text-secondary text-text-secondary hover:text-text underline">
 				Stock
 			</a>
+			<a href="/catalogue" class="text-secondary text-text-secondary hover:text-text underline">
+				Catalogue
+			</a>
 			<a href="/staff" class="text-secondary text-text-secondary hover:text-text underline">
 				Staff
 			</a>
@@ -360,8 +317,18 @@
 	{:else}
 		<div class="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 lg:grid-cols-[1fr_26rem]">
 			<Card label="Items" class="flex min-h-0 flex-col">
+				{#if catalogue.length === 0}
+					<div class="flex flex-col items-start gap-2 p-2">
+						<p class="text-secondary text-text-muted">
+							Nothing to sell yet. Add products to the catalogue and they appear here.
+						</p>
+						<a href="/catalogue" class="text-secondary text-primary-text underline">
+							Open the catalogue
+						</a>
+					</div>
+				{/if}
 				<div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
-					{#each CATALOGUE as item (item.id)}
+					{#each catalogue as item (item.id)}
 						<button
 							type="button"
 							disabled={!sale || settled || busy}
@@ -372,14 +339,19 @@
 							style="min-height: var(--scale-touch-target)"
 						>
 							<span class="text-body font-medium">{item.name}</span>
-							<Numeric value={format.money(item.minor)} align="start" class="text-secondary" />
-							{#if item.treatment === 'exempt'}
-								<Badge tone="neutral">Exempt</Badge>
-							{:else if item.treatment === 'zero_rated'}
-								<Badge tone="neutral">Zero-rated</Badge>
-							{:else}
-								<Badge tone="neutral">{format.percent(item.bp)} VAT</Badge>
-							{/if}
+							<Numeric value={format.money(item.priceMinor)} align="start" class="text-secondary" />
+							<div class="flex flex-wrap items-center gap-1">
+								{#if item.taxTreatment === 'exempt'}
+									<Badge tone="neutral">Exempt</Badge>
+								{:else if item.taxTreatment === 'zero_rated'}
+									<Badge tone="neutral">Zero-rated</Badge>
+								{:else}
+									<Badge tone="neutral">{format.percent(item.taxBasisPoints)} VAT</Badge>
+								{/if}
+								{#if item.unit !== 'pcs'}
+									<Badge tone="neutral">per {item.unit}</Badge>
+								{/if}
+							</div>
 						</button>
 					{/each}
 				</div>

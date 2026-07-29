@@ -145,6 +145,11 @@ pub fn run() {
             commands::fiscal_document,
             commands::print_receipt,
             commands::printer_configured,
+            commands::sellable_products,
+            commands::all_products,
+            commands::scan,
+            commands::save_product,
+            commands::set_product_active,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");

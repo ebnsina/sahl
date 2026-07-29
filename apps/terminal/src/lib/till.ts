@@ -234,6 +234,23 @@ export interface PrintOutcome {
 	bytes: number;
 }
 
+/** A product as the sell screen and the catalogue screen show it. */
+export interface ProductView {
+	id: string;
+	name: string;
+	sku: string | null;
+	barcodes: string[];
+	priceMinor: number;
+	/** `pcs`, `kg`, `L` — printed on the receipt and in the Mushak Unit of Supply column. */
+	unit: string;
+	/** Whether the unit sells in fractions. Selling 0.4 of a piece is a mis-key. */
+	divisible: boolean;
+	taxBasisPoints: number;
+	taxTreatment: TaxTreatment;
+	category: string | null;
+	active: boolean;
+}
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -398,6 +415,30 @@ export const till = {
 	fiscalDocument: (saleId: string) => call<DocumentView>('fiscal_document', { saleId }),
 
 	printerConfigured: () => call<boolean>('printer_configured'),
+
+	sellableProducts: () => call<ProductView[]>('sellable_products'),
+
+	allProducts: () => call<ProductView[]>('all_products'),
+
+	/** `null` for an unrecognised code — an ordinary event at a counter, not a fault. */
+	scan: (barcode: string) => call<ProductView | null>('scan', { barcode }),
+
+	saveProduct: (input: {
+		/** Absent for a new product. */
+		productId?: string | null;
+		name: string;
+		sku?: string | null;
+		barcodes: string[];
+		priceMinor: number;
+		unit: string;
+		taxBasisPoints: number;
+		taxTreatment: TaxTreatment;
+		category?: string | null;
+		pin: string;
+	}) => call<ProductView[]>('save_product', input),
+
+	setProductActive: (productId: string, active: boolean, pin: string) =>
+		call<ProductView[]>('set_product_active', { productId, active, pin }),
 
 	printReceipt: (input: {
 		saleId: string;

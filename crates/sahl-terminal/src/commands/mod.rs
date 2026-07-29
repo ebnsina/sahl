@@ -16,6 +16,7 @@ use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
 
 use sahl_core::Timestamp;
+use sahl_core::catalogue::{CatalogueEvent, ProductDetails, Unit};
 use sahl_core::inventory::{InventoryEvent, IssueReason};
 use sahl_core::money::{Currency, Money, Rate, Rounding};
 use sahl_core::outlet::{FiscalRegime, OutletEvent, OutletSettings, Profile};
@@ -86,7 +87,8 @@ impl From<TerminalError> for CommandError {
             | TerminalError::Shift(_)
             | TerminalError::Inventory(_)
             | TerminalError::Outlet(_)
-            | TerminalError::FiscalDocument(_) => "rejected",
+            | TerminalError::FiscalDocument(_)
+            | TerminalError::Catalogue(_) => "rejected",
             TerminalError::NotInvoiced { .. } => "not_invoiced",
             TerminalError::Directory(_) | TerminalError::Purchase(_) | TerminalError::Fiscal(_) => {
                 "rejected"
@@ -1560,4 +1562,227 @@ pub fn print_receipt(
 #[tauri::command]
 pub fn printer_configured(printer: tauri::State<'_, PrinterTarget>) -> bool {
     printer.is_configured()
+}
+
+// -------------------------------------------------------------------------------------------
+// Catalogue
+// -------------------------------------------------------------------------------------------
+
+/// A product as the sell screen and the catalogue screen show it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductView {
+    pub id: Uuid,
+    pub name: String,
+    pub sku: Option<String>,
+    pub barcodes: Vec<String>,
+    pub price_minor: i64,
+    /// `pcs`, `kg`, `L` — printed on the receipt and in the Mushak "Unit of Supply" column.
+    pub unit: &'static str,
+    /// Whether the unit can be sold in fractions, so the UI knows to offer a scale or reject "0.5".
+    pub divisible: bool,
+    pub tax_basis_points: i32,
+    /// `standard`, `zero_rated` or `exempt` — three treatments, not one rate.
+    pub tax_treatment: &'static str,
+    pub category: Option<String>,
+    pub active: bool,
+}
+
+impl ProductView {
+    fn of(product: &sahl_core::catalogue::Product) -> Self {
+        let (tax_treatment, tax_basis_points) = match product.tax_class {
+            TaxClass::Standard { rate } => ("standard", rate.basis_points()),
+            TaxClass::ZeroRated => ("zero_rated", 0),
+            TaxClass::Exempt => ("exempt", 0),
+        };
+
+        Self {
+            id: product.id,
+            name: product.name.clone(),
+            sku: product.sku.clone(),
+            barcodes: product.barcodes.clone(),
+            price_minor: product.price.minor(),
+            unit: product.unit.label(),
+            divisible: product.unit.is_divisible(),
+            tax_basis_points,
+            tax_treatment,
+            category: product.category.clone(),
+            active: product.active,
+        }
+    }
+}
+
+/// What the sell screen shows: active products, by name.
+#[tauri::command]
+pub fn sellable_products(
+    state: tauri::State<'_, TerminalState>,
+) -> Result<Vec<ProductView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal
+        .catalogue()
+        .sellable()
+        .into_iter()
+        .map(ProductView::of)
+        .collect())
+}
+
+/// The whole catalogue, withdrawn products included.
+#[tauri::command]
+pub fn all_products(
+    state: tauri::State<'_, TerminalState>,
+) -> Result<Vec<ProductView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal
+        .catalogue()
+        .all()
+        .into_iter()
+        .map(ProductView::of)
+        .collect())
+}
+
+/// Resolve a scanned barcode.
+///
+/// Returns `None` rather than erroring on an unknown code: an unrecognised scan is an ordinary
+/// event at a counter — a loyalty card, a coupon, a competitor's packaging — not a fault.
+#[tauri::command]
+pub fn scan(
+    state: tauri::State<'_, TerminalState>,
+    barcode: String,
+) -> Result<Option<ProductView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal
+        .catalogue()
+        .by_barcode(barcode.trim())
+        .map(ProductView::of))
+}
+
+/// Add a product, or change one.
+///
+/// `product_id` absent means a new product. Editing needs an existing one, and a full replacement
+/// rather than a patch — two devices editing while apart cannot have patches merged into a state
+/// either intended.
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a product genuinely carries this many independent facts, and a struct would only \
+              move the argument list to the TypeScript side"
+)]
+pub fn save_product(
+    state: tauri::State<'_, TerminalState>,
+    product_id: Option<Uuid>,
+    name: String,
+    sku: Option<String>,
+    barcodes: Vec<String>,
+    price_minor: i64,
+    unit: String,
+    tax_basis_points: i32,
+    tax_treatment: String,
+    category: Option<String>,
+    pin: String,
+) -> Result<Vec<ProductView>, CommandError> {
+    let unit = Unit::from_label(&unit).map_err(|_| CommandError {
+        code: "bad_unit",
+        message: format!("{unit} is not a unit of supply"),
+    })?;
+
+    let details = ProductDetails {
+        name: name.trim().to_owned(),
+        sku: sku.and_then(non_empty),
+        barcodes: barcodes.into_iter().filter_map(non_empty).collect(),
+        price: Money::from_minor(price_minor, Currency::Bdt),
+        unit,
+        tax_class: tax_class(&tax_treatment, tax_basis_points)?,
+        category: category.and_then(non_empty),
+    };
+
+    let authorized_by = authorize(&state, Permission::EditCatalogue, &pin)?;
+
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let event = match product_id {
+        Some(product_id) => CatalogueEvent::ProductUpdated {
+            product_id,
+            details,
+            at: now(),
+            updated_by: authorized_by,
+        },
+        None => CatalogueEvent::ProductAdded {
+            product_id: new_id(),
+            details,
+            at: now(),
+            added_by: authorized_by,
+        },
+    };
+
+    terminal.record_catalogue(&event, new_id(), now())?;
+
+    Ok(terminal
+        .catalogue()
+        .all()
+        .into_iter()
+        .map(ProductView::of)
+        .collect())
+}
+
+/// Take a product off the sell screen, or put it back.
+#[tauri::command]
+pub fn set_product_active(
+    state: tauri::State<'_, TerminalState>,
+    product_id: Uuid,
+    active: bool,
+    pin: String,
+) -> Result<Vec<ProductView>, CommandError> {
+    let authorized_by = authorize(&state, Permission::EditCatalogue, &pin)?;
+
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let event = if active {
+        CatalogueEvent::ProductRestored {
+            product_id,
+            at: now(),
+            restored_by: authorized_by,
+        }
+    } else {
+        CatalogueEvent::ProductWithdrawn {
+            product_id,
+            at: now(),
+            withdrawn_by: authorized_by,
+        }
+    };
+
+    terminal.record_catalogue(&event, new_id(), now())?;
+
+    Ok(terminal
+        .catalogue()
+        .all()
+        .into_iter()
+        .map(ProductView::of)
+        .collect())
+}
+
+/// Trim, and treat an empty string as absent.
+///
+/// A form field someone tabbed through sends `""`, which is not the same as a product having no
+/// SKU — and storing one would make an empty string searchable.
+fn non_empty(value: String) -> Option<String> {
+    let trimmed = value.trim().to_owned();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
