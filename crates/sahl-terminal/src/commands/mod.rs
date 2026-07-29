@@ -18,6 +18,7 @@ use argon2::password_hash::rand_core::OsRng;
 use sahl_core::Timestamp;
 use sahl_core::inventory::{InventoryEvent, IssueReason};
 use sahl_core::money::{Currency, Money, Rate, Rounding};
+use sahl_core::purchasing::{CloseReason, OrderLine, PurchaseEvent};
 use sahl_core::quantity::Quantity;
 use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
 use sahl_core::shift::{CashMovementReason, ShiftEvent};
@@ -28,8 +29,8 @@ use uuid::Uuid;
 use crate::terminal::{Terminal, TerminalError};
 
 pub use view::{
-    AuditView, BatchView, LineView, SaleView, ShiftView, StaffView, StockView, TaxGroupView,
-    TenderView, VarianceView,
+    AuditView, BatchView, LineView, OrderLineView, OrderView, SaleView, ShiftView, StaffView,
+    StockView, TaxGroupView, TenderView, VarianceView,
 };
 
 /// Managed Tauri state.
@@ -81,7 +82,8 @@ impl From<TerminalError> for CommandError {
             TerminalError::Sale(_) | TerminalError::Shift(_) | TerminalError::Inventory(_) => {
                 "rejected"
             }
-            TerminalError::Directory(_) => "rejected",
+            TerminalError::Directory(_) | TerminalError::Purchase(_) => "rejected",
+            TerminalError::UnknownOrder { .. } => "unknown_order",
             TerminalError::NotAuthorized => "not_authorized",
             TerminalError::NoApprover => "no_approver",
             TerminalError::NoOpenShift => "no_open_shift",
@@ -927,6 +929,203 @@ fn staff_role(role: &str) -> Result<Role, CommandError> {
         other => Err(CommandError {
             code: "bad_role",
             message: format!("{other} is not a role"),
+        }),
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Purchase orders
+// -------------------------------------------------------------------------------------------
+
+type OrderResult = Result<Vec<OrderView>, CommandError>;
+
+fn order_views(terminal: &Terminal) -> OrderResult {
+    terminal
+        .orders()
+        .into_iter()
+        .map(|order| {
+            OrderView::of(order, Currency::Bdt).map_err(|error| CommandError {
+                code: "rejected",
+                message: error.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn with_orders<F>(state: &TerminalState, act: F) -> OrderResult
+where
+    F: FnOnce(&mut Terminal) -> Result<(), TerminalError>,
+{
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    act(&mut terminal)?;
+    order_views(&terminal)
+}
+
+/// One line of an order as the UI sends it.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderLineInput {
+    pub product_id: Uuid,
+    pub quantity_milli: i64,
+    pub unit_cost_minor: i64,
+}
+
+/// Place an order with a supplier.
+#[tauri::command]
+pub fn place_order(
+    state: tauri::State<'_, TerminalState>,
+    supplier: String,
+    reference: Option<String>,
+    expected_at_millis: Option<i64>,
+    lines: Vec<OrderLineInput>,
+    placed_by: Uuid,
+) -> OrderResult {
+    if supplier.trim().is_empty() {
+        return Err(CommandError {
+            code: "bad_supplier",
+            message: "an order needs a supplier".to_owned(),
+        });
+    }
+
+    let lines: Vec<OrderLine> = lines
+        .into_iter()
+        .map(|line| OrderLine {
+            line_id: new_id(),
+            product_id: line.product_id,
+            quantity: Quantity::from_milli(line.quantity_milli),
+            unit_cost: Money::from_minor(line.unit_cost_minor, Currency::Bdt),
+        })
+        .collect();
+
+    with_orders(&state, |terminal| {
+        terminal
+            .record_purchase(
+                &PurchaseEvent::Placed {
+                    order_id: new_id(),
+                    supplier: supplier.trim().to_owned(),
+                    reference: reference.and_then(|value| {
+                        let trimmed = value.trim().to_owned();
+                        (!trimmed.is_empty()).then_some(trimmed)
+                    }),
+                    lines,
+                    expected_at: expected_at_millis.map(Timestamp::from_millis),
+                    at: now(),
+                    placed_by,
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// Book part or all of a line in, creating the batch it becomes.
+///
+/// Two events, one action: the order records that stock arrived against it, and the inventory book
+/// records the batch on the shelf. Recording only one of them is how a delivery ends up either
+/// invisible to a recall or invisible to the supplier reconciliation.
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a receipt against an order carries this many independent facts; a struct would only \
+              move the argument list to the TypeScript side"
+)]
+pub fn receive_against_order(
+    state: tauri::State<'_, TerminalState>,
+    order_id: Uuid,
+    line_id: Uuid,
+    quantity_milli: i64,
+    unit_cost_minor: i64,
+    lot: Option<String>,
+    expires_at_millis: Option<i64>,
+    received_by: Uuid,
+) -> OrderResult {
+    with_orders(&state, |terminal| {
+        let product_id = terminal
+            .order(order_id)?
+            .line(line_id)
+            .ok_or(TerminalError::UnknownOrder { order_id })?
+            .line
+            .product_id;
+
+        let supplier = terminal.order(order_id)?.supplier.clone();
+        let batch_id = new_id();
+        let unit_cost = Money::from_minor(unit_cost_minor, Currency::Bdt);
+        let quantity = Quantity::from_milli(quantity_milli);
+
+        terminal.record_receipt(
+            &PurchaseEvent::LineReceived {
+                order_id,
+                line_id,
+                batch_id,
+                quantity,
+                unit_cost,
+                at: now(),
+                received_by,
+            },
+            &InventoryEvent::BatchReceived {
+                batch_id,
+                product_id,
+                lot,
+                expires_at: expires_at_millis.map(Timestamp::from_millis),
+                quantity,
+                unit_cost,
+                supplier: Some(supplier),
+                at: now(),
+                received_by,
+            },
+            now(),
+        )
+    })
+}
+
+/// Finish with an order, whether or not everything arrived.
+#[tauri::command]
+pub fn close_order(
+    state: tauri::State<'_, TerminalState>,
+    order_id: Uuid,
+    reason: String,
+    closed_by: Uuid,
+) -> OrderResult {
+    let reason = close_reason(&reason)?;
+    with_orders(&state, |terminal| {
+        terminal
+            .record_purchase(
+                &PurchaseEvent::Closed {
+                    order_id,
+                    reason,
+                    at: now(),
+                    closed_by,
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// Every order this outlet knows about.
+#[tauri::command]
+pub fn order_list(state: tauri::State<'_, TerminalState>) -> OrderResult {
+    with_orders(&state, |_| Ok(()))
+}
+
+/// Map the UI's reason string onto the domain enum.
+///
+/// Rejected rather than defaulted: "short shipped" and "cancelled" describe different suppliers,
+/// and filing one as the other is how a supplier's reliability becomes unmeasurable.
+fn close_reason(reason: &str) -> Result<CloseReason, CommandError> {
+    match reason {
+        "complete" => Ok(CloseReason::Complete),
+        "short_shipped" => Ok(CloseReason::ShortShipped),
+        "cancelled" => Ok(CloseReason::Cancelled),
+        other => Err(CommandError {
+            code: "unknown_reason",
+            message: format!("{other} is not a reason to close an order"),
         }),
     }
 }

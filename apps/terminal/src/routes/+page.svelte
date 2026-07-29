@@ -235,6 +235,9 @@
 			<a href="/stock" class="text-secondary text-text-secondary hover:text-text underline">
 				Stock
 			</a>
+			<a href="/orders" class="text-secondary text-text-secondary hover:text-text underline">
+				Orders
+			</a>
 		</div>
 	</header>
 

@@ -237,6 +237,9 @@
 			{/if}
 		</div>
 		<div class="flex gap-4">
+			<a href="/orders" class="text-secondary text-text-secondary hover:text-text underline">
+				Orders
+			</a>
 			<a href="/shift" class="text-secondary text-text-secondary hover:text-text underline">Shift</a
 			>
 			<a href="/" class="text-secondary text-text-secondary hover:text-text underline">

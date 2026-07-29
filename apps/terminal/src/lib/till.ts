@@ -143,6 +143,37 @@ export interface AuditView {
 	unapproved: boolean;
 }
 
+/** One order line, with what has arrived against it. */
+export interface OrderLineView {
+	lineId: string;
+	productId: string;
+	orderedMilli: number;
+	receivedMilli: number;
+	/** Ordered minus received. Negative means the supplier sent more than was asked for. */
+	outstandingMilli: number;
+	unitCostMinor: number;
+	receivedValueMinor: number;
+	/** The price charged did not match the price ordered. */
+	priceChanged: boolean;
+}
+
+export interface OrderView {
+	id: string;
+	supplier: string;
+	reference: string | null;
+	expectedAt: number | null;
+	placedAt: number;
+	status: 'awaiting' | 'partly_received' | 'fully_received' | 'closed';
+	closeReason: 'complete' | 'short_shipped' | 'cancelled' | 'unknown' | null;
+	orderedValueMinor: number;
+	receivedValueMinor: number;
+	lines: OrderLineView[];
+	currency: string;
+}
+
+/** Why an order stopped short of being fully received. */
+export type CloseReason = 'complete' | 'short_shipped' | 'cancelled';
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -292,5 +323,29 @@ export const till = {
 		pin: string;
 	}) => call<StaffView[]>('enrol_staff', input),
 
-	auditFeed: () => call<AuditView[]>('audit_feed')
+	auditFeed: () => call<AuditView[]>('audit_feed'),
+
+	orderList: () => call<OrderView[]>('order_list'),
+
+	placeOrder: (input: {
+		supplier: string;
+		reference?: string | null;
+		expectedAtMillis?: number | null;
+		lines: Array<{ productId: string; quantityMilli: number; unitCostMinor: number }>;
+		placedBy: string;
+	}) => call<OrderView[]>('place_order', input),
+
+	/** Books the delivery against the order and onto the shelf in one atomic write. */
+	receiveAgainstOrder: (input: {
+		orderId: string;
+		lineId: string;
+		quantityMilli: number;
+		unitCostMinor: number;
+		lot?: string | null;
+		expiresAtMillis?: number | null;
+		receivedBy: string;
+	}) => call<OrderView[]>('receive_against_order', input),
+
+	closeOrder: (orderId: string, reason: CloseReason, closedBy: string) =>
+		call<OrderView[]>('close_order', { orderId, reason, closedBy })
 };

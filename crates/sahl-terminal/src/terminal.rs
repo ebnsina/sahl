@@ -12,10 +12,13 @@
 //! disk before updating memory means the in-memory state can never claim something the disk does
 //! not have. A till that shows a sale it did not persist is worse than one that refuses the sale.
 
+use std::collections::BTreeMap;
+
 use sahl_core::event::{EventChain, EventEnvelope, EventHeader};
 use sahl_core::inventory::{InventoryBook, InventoryError, InventoryEvent};
 use sahl_core::policy::lease::ClaimVerdict;
 use sahl_core::projection::SaleBook;
+use sahl_core::purchasing::{PurchaseError, PurchaseEvent, PurchaseOrder};
 use sahl_core::sale::{Sale, SaleError, SaleEvent};
 use sahl_core::shift::{Shift, ShiftError, ShiftEvent, ShiftReport, ShiftStatus};
 use sahl_core::staff::{Directory, DirectoryError, Permission, SignIn, StaffEvent};
@@ -47,6 +50,12 @@ pub enum TerminalError {
 
     #[error("{0}")]
     Directory(#[from] DirectoryError),
+
+    #[error("{0}")]
+    Purchase(#[from] PurchaseError),
+
+    #[error("no purchase order {order_id}")]
+    UnknownOrder { order_id: Uuid },
 
     /// Nobody signed in, or the PIN did not match. Deliberately one variant: the UI shows the same
     /// message either way, and splitting it invites a screen that leaks which half was wrong.
@@ -93,6 +102,8 @@ pub struct Terminal {
     shift: Option<Shift>,
     stock: InventoryBook,
     staff: Directory,
+    /// Several orders are open at once, unlike the single drawer — so a map, not an Option.
+    orders: BTreeMap<Uuid, PurchaseOrder>,
     identity: DeviceIdentity,
 }
 
@@ -117,6 +128,7 @@ impl Terminal {
         let mut book = SaleBook::new();
         let mut stock = InventoryBook::new();
         let mut staff = Directory::new();
+        let mut purchase_events: BTreeMap<Uuid, Vec<PurchaseEvent>> = BTreeMap::new();
         let mut shift_events: Vec<ShiftEvent> = Vec::new();
         for envelope in &stored {
             // Sale and shift events project separately; anything else belongs to a projection this
@@ -142,6 +154,16 @@ impl Terminal {
                         staff.apply(&event)?;
                     }
                 }
+                kind if kind.starts_with("purchase.") => {
+                    if let Ok(event) = envelope.payload_as::<PurchaseEvent>() {
+                        // Grouped by order before replay: each aggregate expects its own stream
+                        // beginning with a placement, and a merged one fails on the second.
+                        purchase_events
+                            .entry(event.order_id())
+                            .or_default()
+                            .push(event);
+                    }
+                }
                 _ => {}
             }
         }
@@ -154,6 +176,16 @@ impl Terminal {
             shift: latest_open_shift(&shift_events)?,
             stock,
             staff,
+            orders: purchase_events
+                .into_iter()
+                .filter_map(|(order_id, events)| {
+                    // A stream missing its placement belongs to an order this device never saw
+                    // opened; skipping it beats refusing to boot over a sibling's history.
+                    PurchaseOrder::replay(&events)
+                        .ok()
+                        .map(|order| (order_id, order))
+                })
+                .collect(),
             identity,
         })
     }
@@ -236,6 +268,16 @@ impl Terminal {
         Ok(envelope)
     }
 
+    const fn header(&self, event_id: Uuid, occurred_at: Timestamp) -> EventHeader {
+        EventHeader {
+            event_id,
+            tenant_id: self.identity.tenant_id,
+            outlet_id: self.identity.outlet_id,
+            device_id: self.identity.device_id,
+            occurred_at,
+        }
+    }
+
     /// Seal and persist any event without touching a projection.
     ///
     /// Generic over the payload because the chain does not care what kind an event is — it only
@@ -278,6 +320,88 @@ impl Terminal {
         let envelope = self.seal(event, event_id, occurred_at)?;
         self.stock = candidate;
         Ok(envelope)
+    }
+
+    /// Validate, seal, persist, and project one purchase event.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the event is invalid for the current state or cannot be persisted.
+    pub fn record_purchase(
+        &mut self,
+        event: &PurchaseEvent,
+        event_id: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<EventEnvelope, TerminalError> {
+        let order_id = event.order_id();
+
+        let candidate = match self.orders.get(&order_id) {
+            Some(order) => {
+                let mut candidate = order.clone();
+                candidate.apply(event)?;
+                candidate
+            }
+            None => PurchaseOrder::replay(std::slice::from_ref(event))?,
+        };
+
+        let envelope = self.seal(event, event_id, occurred_at)?;
+        self.orders.insert(order_id, candidate);
+        Ok(envelope)
+    }
+
+    /// Book a delivery in against an order, in one atomic write.
+    ///
+    /// Two events, one action: the order records that stock arrived, the batch ledger records it on
+    /// the shelf. Appending them separately can leave an order claiming a delivery with no batch to
+    /// show for it — and both halves look internally consistent afterwards, so nobody can explain
+    /// the discrepancy later.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if either event is invalid or the write fails. Nothing is written and
+    /// neither projection moves when this returns an error.
+    pub fn record_receipt(
+        &mut self,
+        purchase: &PurchaseEvent,
+        stock: &InventoryEvent,
+        occurred_at: Timestamp,
+    ) -> Result<(), TerminalError> {
+        // Both validated before either is sealed, so a refused receipt leaves the till untouched.
+        let order_id = purchase.order_id();
+        let mut order = match self.orders.get(&order_id) {
+            Some(existing) => existing.clone(),
+            None => return Err(TerminalError::UnknownOrder { order_id }),
+        };
+        order.apply(purchase)?;
+
+        let mut book = self.stock.clone();
+        book.apply(stock)?;
+
+        let purchase_envelope = self
+            .chain
+            .append(self.header(Uuid::now_v7(), occurred_at), purchase)?;
+        let stock_envelope = self
+            .chain
+            .append(self.header(Uuid::now_v7(), occurred_at), stock)?;
+
+        self.store
+            .append_all(&[purchase_envelope, stock_envelope])?;
+
+        self.orders.insert(order_id, order);
+        self.stock = book;
+        Ok(())
+    }
+
+    /// Every purchase order this outlet knows about, oldest first.
+    #[must_use]
+    pub fn orders(&self) -> Vec<&PurchaseOrder> {
+        self.orders.values().collect()
+    }
+
+    /// # Errors
+    /// [`TerminalError::UnknownOrder`] if there is no such order.
+    pub fn order(&self, order_id: Uuid) -> Result<&PurchaseOrder, TerminalError> {
+        self.orders
+            .get(&order_id)
+            .ok_or(TerminalError::UnknownOrder { order_id })
     }
 
     /// Validate, seal, persist, and project one staff event.
@@ -1270,5 +1394,198 @@ mod tests {
 
         assert_eq!(flagged.len(), 1);
         assert_eq!(flagged[0].actor, id(CASHIER));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Purchase orders
+    // ------------------------------------------------------------------------------------------
+
+    const ORDER: u128 = 0x0DE2;
+    const ORDER_LINE: u128 = 0x11E;
+
+    fn placed(order: u128, milli: i64, cost: i64) -> PurchaseEvent {
+        PurchaseEvent::Placed {
+            order_id: id(order),
+            supplier: "Karim Traders".to_owned(),
+            reference: Some("KT-4471".to_owned()),
+            lines: vec![sahl_core::purchasing::OrderLine {
+                line_id: id(ORDER_LINE),
+                product_id: id(RICE),
+                quantity: sahl_core::quantity::Quantity::from_milli(milli),
+                unit_cost: Money::from_minor(cost, BDT),
+            }],
+            expected_at: Some(at(3)),
+            at: at(0),
+            placed_by: id(CASHIER),
+        }
+    }
+
+    fn receipt(order: u128, batch: u128, milli: i64, cost: i64) -> (PurchaseEvent, InventoryEvent) {
+        let quantity = sahl_core::quantity::Quantity::from_milli(milli);
+        let unit_cost = Money::from_minor(cost, BDT);
+        (
+            PurchaseEvent::LineReceived {
+                order_id: id(order),
+                line_id: id(ORDER_LINE),
+                batch_id: id(batch),
+                quantity,
+                unit_cost,
+                at: at(3),
+                received_by: id(CASHIER),
+            },
+            InventoryEvent::BatchReceived {
+                batch_id: id(batch),
+                product_id: id(RICE),
+                lot: Some("KT-4471".to_owned()),
+                expires_at: Some(at(90)),
+                quantity,
+                unit_cost,
+                supplier: Some("Karim Traders".to_owned()),
+                at: at(3),
+                received_by: id(CASHIER),
+            },
+        )
+    }
+
+    #[test]
+    fn a_receipt_moves_the_order_and_the_shelf_together() {
+        let mut till = fresh();
+        till.record_purchase(&placed(ORDER, 50_000, 4_000), id(70), at(0))
+            .expect("places");
+
+        let (purchase, stock) = receipt(ORDER, BATCH, 50_000, 4_000);
+        till.record_receipt(&purchase, &stock, at(3))
+            .expect("receives");
+
+        assert_eq!(
+            till.order(id(ORDER))
+                .expect("present")
+                .line(id(ORDER_LINE))
+                .expect("line")
+                .received,
+            sahl_core::quantity::Quantity::from_milli(50_000)
+        );
+        assert_eq!(
+            till.stock().level(id(BATCH)).expect("present").on_hand,
+            sahl_core::quantity::Quantity::from_milli(50_000)
+        );
+    }
+
+    #[test]
+    fn a_refused_receipt_writes_neither_half() {
+        // The reason record_receipt exists. An order claiming a delivery with no batch to show for
+        // it looks internally consistent on both sides, so nobody can explain it afterwards.
+        let mut till = fresh();
+        till.record_purchase(&placed(ORDER, 50_000, 4_000), id(70), at(0))
+            .expect("places");
+        till.record_purchase(
+            &PurchaseEvent::Closed {
+                order_id: id(ORDER),
+                reason: sahl_core::purchasing::CloseReason::Cancelled,
+                at: at(2),
+                closed_by: id(CASHIER),
+            },
+            id(71),
+            at(2),
+        )
+        .expect("closes");
+
+        let unsynced_before = till.unsynced_count().expect("counts");
+        let (purchase, stock) = receipt(ORDER, BATCH, 50_000, 4_000);
+        let refused = till.record_receipt(&purchase, &stock, at(3));
+
+        assert!(refused.is_err(), "a closed order takes no more stock");
+        assert!(
+            till.stock().level(id(BATCH)).is_none(),
+            "nothing reached the shelf"
+        );
+        assert_eq!(
+            till.unsynced_count().expect("counts"),
+            unsynced_before,
+            "nothing reached the log either"
+        );
+    }
+
+    #[test]
+    fn a_part_delivery_leaves_the_rest_outstanding() {
+        let mut till = fresh();
+        till.record_purchase(&placed(ORDER, 50_000, 4_000), id(70), at(0))
+            .expect("places");
+
+        let (purchase, stock) = receipt(ORDER, BATCH, 30_000, 4_000);
+        till.record_receipt(&purchase, &stock, at(3))
+            .expect("receives");
+
+        assert_eq!(
+            till.order(id(ORDER))
+                .expect("present")
+                .line(id(ORDER_LINE))
+                .expect("line")
+                .outstanding(),
+            Ok(sahl_core::quantity::Quantity::from_milli(20_000)),
+            "20kg short, invisible to the batch ledger alone"
+        );
+    }
+
+    #[test]
+    fn several_orders_survive_a_restart_independently() {
+        // The bug this guards: replaying every purchase event as one stream fails on the second
+        // placement, exactly as it would have for shifts.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_purchase(&placed(ORDER, 50_000, 4_000), id(70), at(0))
+            .expect("places");
+        till.record_purchase(&placed(0x0DE3, 12_000, 18_000), id(71), at(1))
+            .expect("places a second");
+
+        let (purchase, stock) = receipt(ORDER, BATCH, 50_000, 4_000);
+        till.record_receipt(&purchase, &stock, at(3))
+            .expect("receives");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.orders().len(), 2);
+        assert_eq!(
+            reloaded
+                .order(id(ORDER))
+                .expect("present")
+                .status()
+                .expect("computes"),
+            sahl_core::purchasing::OrderStatus::FullyReceived
+        );
+        assert_eq!(
+            reloaded
+                .order(id(0x0DE3))
+                .expect("present")
+                .status()
+                .expect("computes"),
+            sahl_core::purchasing::OrderStatus::Awaiting
+        );
+    }
+
+    #[test]
+    fn a_price_change_between_quote_and_delivery_survives_a_restart() {
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_purchase(&placed(ORDER, 50_000, 4_000), id(70), at(0))
+            .expect("places");
+
+        let (purchase, stock) = receipt(ORDER, BATCH, 50_000, 4_600);
+        till.record_receipt(&purchase, &stock, at(3))
+            .expect("receives");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(
+            reloaded
+                .order(id(ORDER))
+                .expect("present")
+                .price_discrepancies()
+                .expect("computes")
+                .len(),
+            1
+        );
     }
 }

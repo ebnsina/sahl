@@ -420,3 +420,105 @@ pub struct AuditView {
     /// The actor approved their own action and their role did not carry it.
     pub unapproved: bool,
 }
+
+/// One order line, with what has arrived against it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderLineView {
+    pub line_id: Uuid,
+    pub product_id: Uuid,
+    pub ordered_milli: i64,
+    pub received_milli: i64,
+    /// Ordered minus received. Negative means the supplier sent more than was asked for.
+    pub outstanding_milli: i64,
+    pub unit_cost_minor: i64,
+    /// What was actually charged across every receipt on this line.
+    pub received_value_minor: i64,
+    /// The price charged did not match the price ordered.
+    pub price_changed: bool,
+}
+
+/// A purchase order as the receiving screen shows it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OrderView {
+    pub id: Uuid,
+    pub supplier: String,
+    pub reference: Option<String>,
+    pub expected_at: Option<i64>,
+    pub placed_at: i64,
+    /// `awaiting`, `partly_received`, `fully_received`, or `closed`.
+    pub status: &'static str,
+    /// Set only when closed: `complete`, `short_shipped`, or `cancelled`.
+    pub close_reason: Option<&'static str>,
+    pub ordered_value_minor: i64,
+    pub received_value_minor: i64,
+    pub lines: Vec<OrderLineView>,
+    pub currency: &'static str,
+}
+
+impl OrderView {
+    /// # Errors
+    /// [`sahl_core::money::MoneyError`] on overflow or a mixed-currency order.
+    pub fn of(
+        order: &sahl_core::purchasing::PurchaseOrder,
+        currency: sahl_core::Currency,
+    ) -> Result<Self, sahl_core::money::MoneyError> {
+        use sahl_core::purchasing::OrderStatus;
+
+        let status = order.status()?;
+        let changed: std::collections::BTreeSet<Uuid> = order
+            .price_discrepancies()?
+            .into_iter()
+            .map(|progress| progress.line.line_id)
+            .collect();
+
+        let mut lines = Vec::new();
+        for progress in order.lines() {
+            lines.push(OrderLineView {
+                line_id: progress.line.line_id,
+                product_id: progress.line.product_id,
+                ordered_milli: progress.line.quantity.milli(),
+                received_milli: progress.received.milli(),
+                outstanding_milli: progress.outstanding()?.milli(),
+                unit_cost_minor: progress.line.unit_cost.minor(),
+                received_value_minor: progress.received_value.minor(),
+                price_changed: changed.contains(&progress.line.line_id),
+            });
+        }
+
+        Ok(Self {
+            id: order.order_id,
+            supplier: order.supplier.clone(),
+            reference: order.reference.clone(),
+            expected_at: order.expected_at.map(sahl_core::Timestamp::millis),
+            placed_at: order.placed_at.millis(),
+            status: match status {
+                OrderStatus::Awaiting => "awaiting",
+                OrderStatus::PartlyReceived => "partly_received",
+                OrderStatus::FullyReceived => "fully_received",
+                OrderStatus::Closed(_) => "closed",
+            },
+            close_reason: match status {
+                OrderStatus::Closed(reason) => Some(close_label(reason)),
+                _ => None,
+            },
+            ordered_value_minor: order.ordered_value()?.minor(),
+            received_value_minor: order.received_value()?.minor(),
+            lines,
+            currency: currency.code(),
+        })
+    }
+}
+
+const fn close_label(reason: sahl_core::purchasing::CloseReason) -> &'static str {
+    use sahl_core::purchasing::CloseReason as R;
+    match reason {
+        R::Complete => "complete",
+        R::ShortShipped => "short_shipped",
+        R::Cancelled => "cancelled",
+        // CloseReason is #[non_exhaustive]; an unnamed reason renders honestly rather than as a
+        // guess about which of the others it resembles.
+        _ => "unknown",
+    }
+}

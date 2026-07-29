@@ -211,7 +211,16 @@
 				{/if}
 			{/if}
 		</div>
-		<a href="/" class="text-secondary text-text-secondary hover:text-text underline">Sell screen</a>
+		<div class="flex gap-4">
+			<a href="/stock" class="text-secondary text-text-secondary hover:text-text underline">Stock</a
+			>
+			<a href="/orders" class="text-secondary text-text-secondary hover:text-text underline">
+				Orders
+			</a>
+			<a href="/" class="text-secondary text-text-secondary hover:text-text underline">
+				Sell screen
+			</a>
+		</div>
 	</header>
 
 	{#if !available}

@@ -86,12 +86,18 @@ impl EventStore {
     /// # Errors
     /// [`StoreError`] on a database failure or a corrupt stored hash.
     pub fn tip(&self) -> Result<ChainTip, StoreError> {
-        let row: Option<(i64, Vec<u8>)> = self
-            .connection
+        Self::tip_within(&self.connection, self.device_id)
+    }
+
+    fn tip_within(
+        connection: &rusqlite::Connection,
+        device_id: Uuid,
+    ) -> Result<ChainTip, StoreError> {
+        let row: Option<(i64, Vec<u8>)> = connection
             .query_row(
                 "SELECT device_seq, hash FROM event WHERE device_id = ?1 \
                  ORDER BY device_seq DESC LIMIT 1",
-                [self.device_id.to_string()],
+                [device_id.to_string()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -118,7 +124,18 @@ impl EventStore {
     /// [`StoreError::SequenceBreak`] if the event does not follow the tip,
     /// [`StoreError::Duplicate`] if it is already stored.
     pub fn append(&mut self, event: &EventEnvelope) -> Result<(), StoreError> {
-        let tip = self.tip()?;
+        Self::append_within(&self.connection, event)
+    }
+
+    /// The body of [`EventStore::append`], against any connection or open transaction.
+    ///
+    /// The tip is read from the same handle as the insert, so events appended inside one
+    /// transaction chain onto each other rather than all claiming the same predecessor sequence.
+    fn append_within(
+        connection: &rusqlite::Connection,
+        event: &EventEnvelope,
+    ) -> Result<(), StoreError> {
+        let tip = Self::tip_within(connection, event.device_id)?;
         let expected = tip.device_seq.saturating_add(1);
         if event.device_seq != expected {
             return Err(StoreError::SequenceBreak {
@@ -138,7 +155,7 @@ impl EventStore {
                 reason: error.to_string(),
             })?;
 
-        let inserted = self.connection.execute(
+        let inserted = connection.execute(
             "INSERT INTO event (
                 device_seq, event_id, tenant_id, outlet_id, device_id,
                 occurred_at, kind, payload, prev_hash, hash, origin, synced_at
@@ -168,6 +185,24 @@ impl EventStore {
             }
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Append several sealed events, all or none.
+    ///
+    /// One action sometimes produces two events — booking a delivery in against an order writes to
+    /// the order and to the batch ledger. Appending those separately can leave an order claiming
+    /// stock arrived with no batch on the shelf, which is a discrepancy nobody can explain later
+    /// because both halves look internally consistent.
+    ///
+    /// # Errors
+    /// The first failure encountered; nothing is written when this returns an error.
+    pub fn append_all(&mut self, events: &[EventEnvelope]) -> Result<(), StoreError> {
+        let transaction = self.connection.transaction()?;
+        for event in events {
+            Self::append_within(&transaction, event)?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     /// Every event, oldest first — the input to a full projection rebuild at startup.
