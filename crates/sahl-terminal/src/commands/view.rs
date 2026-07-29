@@ -289,3 +289,91 @@ const fn variance_label(variance: sahl_core::shift::Variance) -> &'static str {
         sahl_core::shift::Variance::Over { .. } => "over",
     }
 }
+
+/// One batch as the stock screen shows it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchView {
+    pub id: Uuid,
+    pub product_id: Uuid,
+    pub lot: Option<String>,
+    /// Milliseconds since the epoch, formatted by `Intl` on the other side.
+    pub expires_at: Option<i64>,
+    pub received_at: i64,
+    /// Thousandths of a unit — 1234 is 1.234 kg.
+    pub on_hand_milli: i64,
+    pub unit_cost_minor: Option<i64>,
+    /// Below zero means stock left that the book never saw arrive.
+    pub negative: bool,
+}
+
+/// A count that disagreed with the book.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VarianceView {
+    pub batch_id: Uuid,
+    pub expected_milli: i64,
+    pub counted_milli: i64,
+    /// Counted minus expected. Negative means stock is missing.
+    pub delta_milli: i64,
+    pub at: i64,
+    pub counted_by: Uuid,
+}
+
+/// The whole stock position.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StockView {
+    pub batches: Vec<BatchView>,
+    pub variances: Vec<VarianceView>,
+    pub currency: &'static str,
+}
+
+impl StockView {
+    #[must_use]
+    pub fn of(book: &sahl_core::inventory::InventoryBook, currency: sahl_core::Currency) -> Self {
+        Self {
+            batches: book
+                .levels()
+                .iter()
+                .map(|level| BatchView {
+                    id: level.batch.id,
+                    product_id: level.batch.product_id,
+                    lot: level.batch.lot.clone(),
+                    expires_at: level.batch.expires_at.map(sahl_core::Timestamp::millis),
+                    received_at: level.batch.received_at.millis(),
+                    on_hand_milli: level.on_hand.milli(),
+                    unit_cost_minor: book.unit_cost(level.batch.id).map(sahl_core::Money::minor),
+                    negative: level.on_hand.is_negative(),
+                })
+                .collect(),
+            variances: book
+                .variances()
+                .iter()
+                .map(|variance| VarianceView {
+                    batch_id: variance.batch_id,
+                    expected_milli: variance.expected.milli(),
+                    counted_milli: variance.counted.milli(),
+                    delta_milli: variance.delta.milli(),
+                    at: variance.at.millis(),
+                    counted_by: variance.counted_by,
+                })
+                .collect(),
+            currency: currency.code(),
+        }
+    }
+
+    /// The same list with recorded levels removed, for a blind stock count.
+    ///
+    /// Same control as the drawer count, for the same reason: someone counting a shelf while
+    /// looking at what the book expects is confirming a number, not counting stock.
+    #[must_use]
+    pub fn blind(mut self) -> Self {
+        for batch in &mut self.batches {
+            batch.on_hand_milli = 0;
+            batch.negative = false;
+        }
+        self.variances.clear();
+        self
+    }
+}

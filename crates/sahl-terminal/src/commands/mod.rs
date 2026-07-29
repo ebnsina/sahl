@@ -13,6 +13,7 @@ mod view;
 use std::sync::Mutex;
 
 use sahl_core::Timestamp;
+use sahl_core::inventory::{InventoryEvent, IssueReason};
 use sahl_core::money::{Currency, Money, Rate, Rounding};
 use sahl_core::quantity::Quantity;
 use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
@@ -22,7 +23,9 @@ use uuid::Uuid;
 
 use crate::terminal::{Terminal, TerminalError};
 
-pub use view::{LineView, SaleView, ShiftView, TaxGroupView, TenderView};
+pub use view::{
+    BatchView, LineView, SaleView, ShiftView, StockView, TaxGroupView, TenderView, VarianceView,
+};
 
 /// Managed Tauri state.
 ///
@@ -70,7 +73,9 @@ impl From<TerminalError> for CommandError {
             TerminalError::TicketHeld { .. } => "ticket_held",
             TerminalError::Store(_) => "storage",
             TerminalError::Event(_) => "event",
-            TerminalError::Sale(_) | TerminalError::Shift(_) => "rejected",
+            TerminalError::Sale(_) | TerminalError::Shift(_) | TerminalError::Inventory(_) => {
+                "rejected"
+            }
             TerminalError::NoOpenShift => "no_open_shift",
             TerminalError::ShiftAlreadyOpen => "shift_already_open",
         };
@@ -588,6 +593,151 @@ fn cash_reason(reason: &str) -> Result<CashMovementReason, CommandError> {
         other => Err(CommandError {
             code: "unknown_reason",
             message: format!("{other} is not a cash movement reason"),
+        }),
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Stock
+// -------------------------------------------------------------------------------------------
+
+type StockResult = Result<StockView, CommandError>;
+
+fn with_stock<F>(state: &TerminalState, act: F) -> StockResult
+where
+    F: FnOnce(&mut Terminal) -> Result<(), TerminalError>,
+{
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    act(&mut terminal)?;
+    Ok(StockView::of(terminal.stock(), Currency::Bdt))
+}
+
+/// Book a delivery in as a new batch.
+///
+/// Receiving creates a batch rather than adding to one: a second delivery of the same product is a
+/// different lot with its own expiry, and merging them is what makes a recall under-report.
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a delivery line carries this many independent facts; a struct would only move the \
+              argument list to the TypeScript side"
+)]
+pub fn receive_stock(
+    state: tauri::State<'_, TerminalState>,
+    product_id: Uuid,
+    lot: Option<String>,
+    expires_at_millis: Option<i64>,
+    quantity_milli: i64,
+    unit_cost_minor: i64,
+    supplier: Option<String>,
+    received_by: Uuid,
+) -> StockResult {
+    with_stock(&state, |terminal| {
+        terminal
+            .record_stock(
+                &InventoryEvent::BatchReceived {
+                    batch_id: new_id(),
+                    product_id,
+                    lot,
+                    expires_at: expires_at_millis.map(Timestamp::from_millis),
+                    quantity: Quantity::from_milli(quantity_milli),
+                    unit_cost: Money::from_minor(unit_cost_minor, Currency::Bdt),
+                    supplier,
+                    at: now(),
+                    received_by,
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// Record a physical count of one batch.
+///
+/// Absolute, not a delta — a count is "there are seven here", and the adjustment is derived. A
+/// delta would put the subtraction in a person's hands, which is both a place to err and a place
+/// to hide.
+#[tauri::command]
+pub fn count_stock(
+    state: tauri::State<'_, TerminalState>,
+    batch_id: Uuid,
+    counted_milli: i64,
+    counted_by: Uuid,
+) -> StockResult {
+    with_stock(&state, |terminal| {
+        terminal
+            .record_stock(
+                &InventoryEvent::BatchCounted {
+                    batch_id,
+                    counted: Quantity::from_milli(counted_milli),
+                    at: now(),
+                    counted_by,
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// Write stock off, or send it out.
+#[tauri::command]
+pub fn issue_stock(
+    state: tauri::State<'_, TerminalState>,
+    batch_id: Uuid,
+    quantity_milli: i64,
+    reason: String,
+    issued_by: Uuid,
+) -> StockResult {
+    let reason = issue_reason(&reason)?;
+    with_stock(&state, |terminal| {
+        terminal
+            .record_stock(
+                &InventoryEvent::StockIssued {
+                    batch_id,
+                    quantity: Quantity::from_milli(quantity_milli),
+                    reason,
+                    sale_id: None,
+                    at: now(),
+                    issued_by,
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// The current stock position.
+#[tauri::command]
+pub fn stock_position(state: tauri::State<'_, TerminalState>) -> StockResult {
+    with_stock(&state, |_| Ok(()))
+}
+
+/// The same batches with recorded levels withheld, for a blind count.
+#[tauri::command]
+pub fn blind_stock_sheet(state: tauri::State<'_, TerminalState>) -> StockResult {
+    with_stock(&state, |_| Ok(())).map(StockView::blind)
+}
+
+/// Map the UI's reason string onto the domain enum.
+///
+/// Rejected rather than defaulted: stock written off under the wrong reason is the difference
+/// between spoilage the owner can act on and a number nobody can explain.
+fn issue_reason(reason: &str) -> Result<IssueReason, CommandError> {
+    match reason {
+        "wastage" => Ok(IssueReason::Wastage),
+        "transfer_out" => Ok(IssueReason::TransferOut),
+        "return_to_supplier" => Ok(IssueReason::ReturnToSupplier),
+        "internal" => Ok(IssueReason::Internal),
+        other => Err(CommandError {
+            code: "unknown_reason",
+            message: format!("{other} is not a stock issue reason"),
         }),
     }
 }

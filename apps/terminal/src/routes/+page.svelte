@@ -123,13 +123,6 @@
 		);
 	}
 
-	/**
-	 * Parse a cash entry into exact minor units without floating point.
-	 *
-	 * `parseFloat(entry) * 100` is the obvious version and it is wrong: 19.99 becomes 1998.9999…
-	 * and truncates a taka short. Splitting on the decimal point and padding keeps it exact. This is
-	 * parsing, not arithmetic on a monetary value — the amount goes straight to Rust untouched.
-	 */
 	function tenderCash() {
 		const current = sale;
 		if (!current) return;
@@ -212,6 +205,9 @@
 			{/if}
 			<a href="/shift" class="text-secondary text-text-secondary hover:text-text underline">
 				Shift
+			</a>
+			<a href="/stock" class="text-secondary text-text-secondary hover:text-text underline">
+				Stock
 			</a>
 		</div>
 	</header>

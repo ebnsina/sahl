@@ -86,6 +86,40 @@ export interface ShiftView {
 /** Why cash moved in or out of the drawer outside a sale. */
 export type CashReason = 'float_top_up' | 'skim' | 'petty_cash' | 'refund' | 'correction';
 
+/** One batch as the stock screen shows it. */
+export interface BatchView {
+	id: string;
+	productId: string;
+	lot: string | null;
+	/** Milliseconds since the epoch. */
+	expiresAt: number | null;
+	receivedAt: number;
+	/** Thousandths of a unit: 1234 is 1.234 kg. Zero on a blind sheet. */
+	onHandMilli: number;
+	unitCostMinor: number | null;
+	negative: boolean;
+}
+
+/** A count that disagreed with the book. */
+export interface VarianceView {
+	batchId: string;
+	expectedMilli: number;
+	countedMilli: number;
+	/** Counted minus expected. Negative means stock is missing. */
+	deltaMilli: number;
+	at: number;
+	countedBy: string;
+}
+
+export interface StockView {
+	batches: BatchView[];
+	variances: VarianceView[];
+	currency: string;
+}
+
+/** Why stock left a batch outside a sale. */
+export type IssueReason = 'wastage' | 'transfer_out' | 'return_to_supplier' | 'internal';
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -199,5 +233,26 @@ export const till = {
 	blindCountSheet: () => call<ShiftView>('blind_count_sheet'),
 
 	closeShift: (closedBy: string, closingCashMinor: number) =>
-		call<ShiftView>('close_shift', { closedBy, closingCashMinor })
+		call<ShiftView>('close_shift', { closedBy, closingCashMinor }),
+
+	receiveStock: (input: {
+		productId: string;
+		lot?: string | null;
+		expiresAtMillis?: number | null;
+		quantityMilli: number;
+		unitCostMinor: number;
+		supplier?: string | null;
+		receivedBy: string;
+	}) => call<StockView>('receive_stock', input),
+
+	countStock: (batchId: string, countedMilli: number, countedBy: string) =>
+		call<StockView>('count_stock', { batchId, countedMilli, countedBy }),
+
+	issueStock: (batchId: string, quantityMilli: number, reason: IssueReason, issuedBy: string) =>
+		call<StockView>('issue_stock', { batchId, quantityMilli, reason, issuedBy }),
+
+	stockPosition: () => call<StockView>('stock_position'),
+
+	/** The same batches with recorded levels withheld — a blind shelf count. */
+	blindStockSheet: () => call<StockView>('blind_stock_sheet')
 };

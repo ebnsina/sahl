@@ -13,6 +13,7 @@
 //! not have. A till that shows a sale it did not persist is worse than one that refuses the sale.
 
 use sahl_core::event::{EventChain, EventEnvelope, EventHeader};
+use sahl_core::inventory::{InventoryBook, InventoryError, InventoryEvent};
 use sahl_core::policy::lease::ClaimVerdict;
 use sahl_core::projection::SaleBook;
 use sahl_core::sale::{Sale, SaleError, SaleEvent};
@@ -39,6 +40,9 @@ pub enum TerminalError {
 
     #[error("{0}")]
     Shift(#[from] ShiftError),
+
+    #[error("{0}")]
+    Inventory(#[from] InventoryError),
 
     #[error("no shift is open")]
     NoOpenShift,
@@ -74,6 +78,7 @@ pub struct Terminal {
     book: SaleBook,
     /// The shift running on this till, if any. One drawer, so at most one.
     shift: Option<Shift>,
+    stock: InventoryBook,
     identity: DeviceIdentity,
 }
 
@@ -96,6 +101,7 @@ impl Terminal {
         })?;
 
         let mut book = SaleBook::new();
+        let mut stock = InventoryBook::new();
         let mut shift_events: Vec<ShiftEvent> = Vec::new();
         for envelope in &stored {
             // Sale and shift events project separately; anything else belongs to a projection this
@@ -111,6 +117,11 @@ impl Terminal {
                         shift_events.push(event);
                     }
                 }
+                kind if kind.starts_with("inventory.") => {
+                    if let Ok(event) = envelope.payload_as::<InventoryEvent>() {
+                        stock.apply(&event)?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -121,6 +132,7 @@ impl Terminal {
             chain,
             book,
             shift: latest_open_shift(&shift_events)?,
+            stock,
             identity,
         })
     }
@@ -198,18 +210,25 @@ impl Terminal {
             (None, _) => return Err(TerminalError::NoOpenShift),
         };
 
-        let envelope = self.seal_shift(event, event_id, occurred_at)?;
+        let envelope = self.seal(event, event_id, occurred_at)?;
         self.shift = Some(candidate);
         Ok(envelope)
     }
 
-    /// Seal and persist a shift event without touching the projection.
-    fn seal_shift(
+    /// Seal and persist any event without touching a projection.
+    ///
+    /// Generic over the payload because the chain does not care what kind an event is — it only
+    /// hashes the kind string and the canonical bytes. Each family validates against its own
+    /// aggregate first and calls this last.
+    fn seal<P>(
         &mut self,
-        event: &ShiftEvent,
+        event: &P,
         event_id: Uuid,
         occurred_at: Timestamp,
-    ) -> Result<EventEnvelope, TerminalError> {
+    ) -> Result<EventEnvelope, TerminalError>
+    where
+        P: sahl_core::event::EventPayload + Serialize,
+    {
         let header = EventHeader {
             event_id,
             tenant_id: self.identity.tenant_id,
@@ -220,6 +239,30 @@ impl Terminal {
         let envelope = self.chain.append(header, event)?;
         self.store.append(&envelope)?;
         Ok(envelope)
+    }
+
+    /// Validate, seal, persist, and project one inventory event.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the event is invalid for the current state or cannot be persisted.
+    pub fn record_stock(
+        &mut self,
+        event: &InventoryEvent,
+        event_id: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<EventEnvelope, TerminalError> {
+        let mut candidate = self.stock.clone();
+        candidate.apply(event)?;
+
+        let envelope = self.seal(event, event_id, occurred_at)?;
+        self.stock = candidate;
+        Ok(envelope)
+    }
+
+    /// Every batch this outlet knows about.
+    #[must_use]
+    pub const fn stock(&self) -> &InventoryBook {
+        &self.stock
     }
 
     /// The shift running on this till, if one is.
@@ -818,5 +861,106 @@ mod tests {
             reloaded.shift_report().expect("reports").opening_float,
             Money::from_minor(150_000, BDT)
         );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Stock
+    // ------------------------------------------------------------------------------------------
+
+    const BATCH: u128 = 0xBA7C;
+    const RICE: u128 = 0x21;
+
+    fn received(batch: u128, milli: i64) -> InventoryEvent {
+        InventoryEvent::BatchReceived {
+            batch_id: id(batch),
+            product_id: id(RICE),
+            lot: Some("KT-4471".to_owned()),
+            expires_at: Some(at(90)),
+            quantity: sahl_core::quantity::Quantity::from_milli(milli),
+            unit_cost: Money::from_minor(4_000, BDT),
+            supplier: Some("Karim Traders".to_owned()),
+            at: at(0),
+            received_by: id(CASHIER),
+        }
+    }
+
+    #[test]
+    fn a_delivery_becomes_a_batch_on_the_till() {
+        let mut till = fresh();
+        till.record_stock(&received(BATCH, 10_000), id(70), at(0))
+            .expect("receives");
+
+        assert_eq!(
+            till.stock().level(id(BATCH)).expect("present").on_hand,
+            sahl_core::quantity::Quantity::from_milli(10_000)
+        );
+    }
+
+    #[test]
+    fn a_rejected_stock_event_leaves_the_book_exactly_as_it_was() {
+        // Same reason as sales: a refused action must not half-apply.
+        let mut till = fresh();
+        till.record_stock(&received(BATCH, 10_000), id(70), at(0))
+            .expect("receives");
+
+        let unsynced_before = till.unsynced_count().expect("counts");
+        let duplicate = till.record_stock(&received(BATCH, 5_000), id(71), at(1));
+
+        assert!(duplicate.is_err(), "the same batch cannot arrive twice");
+        assert_eq!(
+            till.stock().level(id(BATCH)).expect("present").on_hand,
+            sahl_core::quantity::Quantity::from_milli(10_000)
+        );
+        assert_eq!(till.unsynced_count().expect("counts"), unsynced_before);
+    }
+
+    #[test]
+    fn a_count_that_disagrees_survives_a_restart() {
+        // The variance is the shrinkage record. Losing it on reboot would erase the only evidence
+        // that stock went missing.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_stock(&received(BATCH, 10_000), id(70), at(0))
+            .expect("receives");
+        till.record_stock(
+            &InventoryEvent::BatchCounted {
+                batch_id: id(BATCH),
+                counted: sahl_core::quantity::Quantity::from_milli(9_400),
+                at: at(1),
+                counted_by: id(CASHIER),
+            },
+            id(71),
+            at(1),
+        )
+        .expect("counts");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.stock().variances().len(), 1);
+        assert_eq!(
+            reloaded.stock().variances()[0].delta,
+            sahl_core::quantity::Quantity::from_milli(-600),
+            "600g missing"
+        );
+    }
+
+    #[test]
+    fn sales_and_stock_share_one_chain_without_disturbing_each_other() {
+        // Both families append to the same hash chain. If either projection consumed the other's
+        // events, this is where it would show.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+
+        till.record(&opened(), id(80), at(0)).expect("opens sale");
+        till.record_stock(&received(BATCH, 10_000), id(70), at(1))
+            .expect("receives");
+        till.record(&line(48_000), id(81), at(2)).expect("adds");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.book().len(), 1);
+        assert_eq!(reloaded.stock().levels().len(), 1);
     }
 }
