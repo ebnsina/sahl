@@ -226,6 +226,14 @@ export type DocumentView =
 	  }
 	| { regime: 'none' };
 
+/** What happened when a receipt was sent to a printer. */
+export interface PrintOutcome {
+	printed: boolean;
+	/** Why not, when it did not. Never a reason to undo a sale. */
+	reason: string | null;
+	bytes: number;
+}
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -388,6 +396,16 @@ export const till = {
 
 	/** Rebuilt from the log on demand — never stored, so it cannot disagree with the sale. */
 	fiscalDocument: (saleId: string) => call<DocumentView>('fiscal_document', { saleId }),
+
+	printerConfigured: () => call<boolean>('printer_configured'),
+
+	printReceipt: (input: {
+		saleId: string;
+		/** Pre-formatted with `Intl` in the outlet's timezone — only the caller knows the outlet. */
+		printedAt: string;
+		paper: 'mm58' | 'mm80';
+		openDrawer: boolean;
+	}) => call<PrintOutcome>('print_receipt', input),
 
 	configureOutlet: (input: {
 		name: string;

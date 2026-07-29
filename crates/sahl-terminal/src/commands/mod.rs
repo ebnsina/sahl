@@ -25,8 +25,10 @@ use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
 use sahl_core::shift::{CashMovementReason, ShiftEvent};
 use sahl_core::staff::{Permission, Role, StaffEvent, pin as staff_pin};
 use sahl_core::tax::{Discount, PricingMode, TaxClass};
+use sahl_escpos::{Document as EscposDocument, PaperWidth};
 use uuid::Uuid;
 
+use crate::printer::PrinterTarget;
 use crate::terminal::{Terminal, TerminalError};
 
 pub use view::{
@@ -1483,4 +1485,79 @@ pub fn fiscal_document(
         },
         _ => DocumentView::None,
     })
+}
+
+// -------------------------------------------------------------------------------------------
+// Printing
+// -------------------------------------------------------------------------------------------
+
+/// What happened when a receipt was sent to a printer.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintOutcome {
+    pub printed: bool,
+    /// Why not, when it did not. Shown to the cashier; never a reason to undo a sale.
+    pub reason: Option<String>,
+    /// How many bytes the job was — useful when diagnosing a printer that accepts and prints
+    /// nothing, which is otherwise indistinguishable from success.
+    pub bytes: usize,
+}
+
+/// Print the receipt for a completed sale.
+///
+/// A failure here is reported, never propagated into the sale. The money is already in the drawer
+/// and the sale is already in the log; paper is a courtesy and a reprintable artefact.
+#[tauri::command]
+pub fn print_receipt(
+    state: tauri::State<'_, TerminalState>,
+    printer: tauri::State<'_, PrinterTarget>,
+    sale_id: Uuid,
+    // Pre-formatted by the UI with `Intl` in the outlet's timezone.
+    printed_at: String,
+    // `mm58` or `mm80`.
+    paper: String,
+    open_drawer: bool,
+) -> Result<PrintOutcome, CommandError> {
+    let paper = match paper.as_str() {
+        "mm58" => PaperWidth::Mm58,
+        "mm80" => PaperWidth::Mm80,
+        other => {
+            return Err(CommandError {
+                code: "bad_paper",
+                // Printing 80mm content on a 58mm roll silently truncates every line, so a wrong
+                // width is refused rather than guessed at.
+                message: format!("{other} is not a paper width"),
+            });
+        }
+    };
+
+    let data = {
+        let terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+        terminal.receipt(sale_id, printed_at)?
+    };
+
+    let job = EscposDocument::render(&data, paper, open_drawer);
+    let bytes = job.bytes().len();
+
+    Ok(match crate::printer::print(&printer, job.bytes()) {
+        Ok(()) => PrintOutcome {
+            printed: true,
+            reason: None,
+            bytes,
+        },
+        Err(error) => PrintOutcome {
+            printed: false,
+            reason: Some(error.to_string()),
+            bytes,
+        },
+    })
+}
+
+/// Whether this till has a printer configured at all.
+#[tauri::command]
+pub fn printer_configured(printer: tauri::State<'_, PrinterTarget>) -> bool {
+    printer.is_configured()
 }

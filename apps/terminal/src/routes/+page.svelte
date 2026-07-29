@@ -10,6 +10,7 @@
 	 * is no arithmetic in this file, and there must never be.
 	 */
 	import Ban from '@lucide/svelte/icons/ban';
+	import Printer from '@lucide/svelte/icons/printer';
 	import Banknote from '@lucide/svelte/icons/banknote';
 	import Check from '@lucide/svelte/icons/check';
 	import Plus from '@lucide/svelte/icons/plus';
@@ -32,6 +33,7 @@
 		till,
 		type SaleView,
 		type DocumentView,
+		type PrintOutcome,
 		type SyncView,
 		type TaxTreatment,
 		type TillStatus
@@ -101,6 +103,8 @@
 	let document = $state<DocumentView | null>(null);
 	/** Why a challan could not be issued. Surfaced, never allowed to block the sale. */
 	let documentProblem = $state<string | null>(null);
+	let hasPrinter = $state(false);
+	let printOutcome = $state<PrintOutcome | null>(null);
 	let status = $state<TillStatus | null>(null);
 	let sync = $state<SyncView | null>(null);
 	let error = $state<{ code: string; message: string } | null>(null);
@@ -138,12 +142,14 @@
 				() => till.status(),
 				(result) => (status = result)
 			);
+			void till.printerConfigured().then((configured) => (hasPrinter = configured));
 		}
 	});
 
 	function startSale() {
 		document = null;
 		documentProblem = null;
+		printOutcome = null;
 		void run(
 			() => till.openSale(CASHIER),
 			(result) => {
@@ -248,6 +254,23 @@
 				// shopkeeper stops using.
 				void fetchDocument(result.id);
 			}
+		);
+	}
+
+	function printReceipt(openDrawer: boolean) {
+		const current = sale;
+		if (!current) return;
+		void run(
+			() =>
+				till.printReceipt({
+					saleId: current.id,
+					// Only this side knows the outlet's timezone, so the receipt's date is formatted
+					// here rather than in Rust — the same reason the renderer refuses to format it.
+					printedAt: format.dateTime(Date.now()),
+					paper: 'mm80',
+					openDrawer
+				}),
+			(result) => (printOutcome = result)
 		);
 	}
 
@@ -583,6 +606,31 @@
 								<div class="border-warn bg-warn-subtle text-warn-text border p-3">
 									<p class="label-caps">No challan issued</p>
 									<p class="text-secondary mt-1">{documentProblem}</p>
+								</div>
+							{/if}
+
+							{#if hasPrinter}
+								<div class="flex flex-col gap-2">
+									<Button
+										variant="secondary"
+										size="lg"
+										icon={Printer}
+										block
+										onclick={() => printReceipt(true)}
+										disabled={busy}
+									>
+										Print receipt
+									</Button>
+									{#if printOutcome && !printOutcome.printed}
+										<!-- The sale is done and the money is in the drawer. This is a thing to
+										     fix, never a thing to have refused the sale over. -->
+										<div class="border-warn bg-warn-subtle text-warn-text border p-3">
+											<p class="label-caps">Not printed</p>
+											<p class="text-secondary mt-1">{printOutcome.reason}</p>
+										</div>
+									{:else if printOutcome?.printed}
+										<p class="text-secondary text-success-text">Sent to the printer.</p>
+									{/if}
 								</div>
 							{/if}
 

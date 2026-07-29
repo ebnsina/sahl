@@ -21,6 +21,7 @@
 
 pub mod commands;
 pub mod enrollment;
+pub mod printer;
 pub mod store;
 pub mod sync;
 pub mod terminal;
@@ -94,6 +95,17 @@ pub fn run() {
                 }
             }
 
+            // Parsed at startup and refused loudly if malformed, like every other setting: a till
+            // that quietly decided not to print is a till whose merchant finds out from a customer.
+            let printer =
+                printer::PrinterTarget::parse(std::env::var("SAHL_PRINTER").ok().as_deref())
+                    .map_err(|error| format!("SAHL_PRINTER is not usable: {error}"))?;
+
+            if printer.is_configured() {
+                eprintln!("printing to {printer:?}");
+            }
+            tauri::Manager::manage(app, printer);
+
             tauri::Manager::manage(app, TerminalState::from_shared(shared));
             Ok(())
         })
@@ -131,6 +143,8 @@ pub fn run() {
             commands::outlet_config,
             commands::configure_outlet,
             commands::fiscal_document,
+            commands::print_receipt,
+            commands::printer_configured,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");

@@ -587,6 +587,80 @@ impl Terminal {
         Ok(None)
     }
 
+    /// Build the receipt for a completed sale.
+    ///
+    /// `printed_at` arrives pre-formatted because a receipt shows local time and only the caller
+    /// knows the outlet's timezone — the same reason `sahl-escpos` refuses to format it itself.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the sale is unknown or was never invoiced.
+    pub fn receipt(
+        &self,
+        sale_id: Uuid,
+        printed_at: String,
+    ) -> Result<sahl_escpos::ReceiptData, TerminalError> {
+        use sahl_escpos::{ReceiptData, ReceiptLine, ReceiptTaxGroup};
+
+        let sale = self.sale(sale_id)?;
+        let totals = sale.totals()?;
+        let seal = self.invoice_seal(sale_id)?;
+
+        Ok(ReceiptData {
+            shop_name: self
+                .outlet
+                .as_ref()
+                .map_or_else(|| "Sahl".to_owned(), |outlet| outlet.name.clone()),
+            shop_address: self.outlet.as_ref().map(|outlet| outlet.address.clone()),
+            tax_registration: self
+                .outlet
+                .as_ref()
+                .and_then(|outlet| outlet.tax_registration.clone()),
+            // The fiscal counter when there is one. Falling back to the sale id gives a customer
+            // something to quote back, without pretending it is an invoice number.
+            invoice_number: seal
+                .map_or_else(|| sale_id.to_string(), |seal| seal.counter.to_string()),
+            printed_at,
+            currency_label: totals.total.currency().code().to_owned(),
+            lines: sale
+                .lines()
+                .iter()
+                .map(|line| ReceiptLine {
+                    name: line.name.clone(),
+                    quantity: line.quantity,
+                    unit_price: line.unit_price,
+                    // A voided line contributes nothing, and printing its original value beside a
+                    // "VOID" mark is how a customer ends up adding it into the total themselves.
+                    total: if line.is_active() {
+                        line.unit_price
+                    } else {
+                        sahl_core::Money::from_minor(0, totals.total.currency())
+                    },
+                    voided: !line.is_active(),
+                })
+                .collect(),
+            tax_groups: totals
+                .tax_groups
+                .iter()
+                .map(|group| ReceiptTaxGroup {
+                    label: tax_group_label(group.tax_class),
+                    taxable_base: group.taxable_base,
+                    tax: group.tax,
+                })
+                .collect(),
+            discount: (!totals.discount.is_zero()).then_some(totals.discount),
+            net: totals.net,
+            tax: totals.tax,
+            total: totals.total,
+            tenders: sale
+                .tenders()
+                .iter()
+                .map(|tender| (tender_label(tender.method), tender.amount))
+                .collect(),
+            change: sale.change_due().ok().filter(|change| !change.is_zero()),
+            footer: None,
+        })
+    }
+
     /// Where this device's fiscal sequence has got to.
     #[must_use]
     pub const fn fiscal_tip(&self) -> FiscalTip {
@@ -891,6 +965,36 @@ impl Terminal {
     /// [`TerminalError::Sale`] on overflow.
     pub fn takings(&self, currency: sahl_core::Currency) -> Result<Money, TerminalError> {
         Ok(self.book.takings(currency)?)
+    }
+}
+
+/// How a tender prints on a receipt.
+///
+/// Written out rather than derived from `Debug`, which would put `MobileWallet { wallet: Bkash }`
+/// on a customer's receipt.
+fn tender_label(method: sahl_core::sale::TenderMethod) -> String {
+    use sahl_core::sale::TenderMethod as M;
+    match method {
+        M::Cash => "Cash".to_owned(),
+        M::Card => "Card".to_owned(),
+        M::MobileWallet { wallet } => format!("{wallet:?}"),
+        M::BankTransfer => "Bank transfer".to_owned(),
+        M::StoreCredit => "Store credit".to_owned(),
+        // TenderMethod is #[non_exhaustive]. A method this build cannot name prints honestly
+        // rather than as a Rust debug string a customer would have to decipher.
+        _ => "Other".to_owned(),
+    }
+}
+
+/// How a VAT class prints on a receipt.
+///
+/// Zero-rated and exempt are named rather than shown as "0%": they are different treatments, and a
+/// customer reading a receipt is the last person who should have to infer which.
+fn tax_group_label(class: sahl_core::tax::TaxClass) -> String {
+    match class {
+        sahl_core::tax::TaxClass::Standard { rate } => format!("VAT {rate}"),
+        sahl_core::tax::TaxClass::ZeroRated => "Zero-rated".to_owned(),
+        sahl_core::tax::TaxClass::Exempt => "Exempt".to_owned(),
     }
 }
 
