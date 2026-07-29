@@ -281,4 +281,9 @@ jobs:
 
       - run: pnpm -r check
 
+      - name: Unit tests
+        # Only `packages/ui` has any: it holds the one function in TypeScript that turns a keyboard
+        # entry into a money value, which is the single place JS can put a wrong number into the log.
+        run: pnpm -r test
+
       - run: pnpm -r build

@@ -9,7 +9,16 @@
 	 * Every amount rendered arrives as an exact integer from Rust and is formatted by `Intl`. There
 	 * is no arithmetic in this file, and there must never be.
 	 */
-	import { Badge, Button, Card, Field, Input, Numeric, createFormatters } from '@sahl/ui';
+	import {
+		Badge,
+		Button,
+		Card,
+		Field,
+		Input,
+		Numeric,
+		createFormatters,
+		parseMinor
+	} from '@sahl/ui';
 	import {
 		asTillError,
 		isTillAvailable,
@@ -121,17 +130,10 @@
 	 * and truncates a taka short. Splitting on the decimal point and padding keeps it exact. This is
 	 * parsing, not arithmetic on a monetary value — the amount goes straight to Rust untouched.
 	 */
-	function toMinor(entry: string): number | null {
-		const trimmed = entry.trim();
-		if (!/^\d+(\.\d{0,2})?$/.test(trimmed)) return null;
-		const [whole = '0', fraction = ''] = trimmed.split('.');
-		return Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
-	}
-
 	function tenderCash() {
 		const current = sale;
 		if (!current) return;
-		const amountMinor = toMinor(cashInput);
+		const amountMinor = parseMinor(cashInput, 'BDT');
 		if (amountMinor === null || amountMinor <= 0) {
 			error = { code: 'bad_amount', message: 'Enter a cash amount like 500 or 499.50' };
 			return;
@@ -208,6 +210,9 @@
 				<span class="label-caps">Takings</span>
 				<Numeric value={format.money(status.takingsMinor)} class="font-semibold" />
 			{/if}
+			<a href="/shift" class="text-secondary text-text-secondary hover:text-text underline">
+				Shift
+			</a>
 		</div>
 	</header>
 

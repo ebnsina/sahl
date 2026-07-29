@@ -13,5 +13,5 @@ export { default as Field } from './components/Field.svelte';
 export { default as Input } from './components/Input.svelte';
 export { default as Numeric } from './components/Numeric.svelte';
 
-export { createFormatters, minorToDecimalString, FormatError } from './lib/format.js';
+export { createFormatters, minorToDecimalString, parseMinor, FormatError } from './lib/format.js';
 export type { CurrencyCode, FormatContext, Formatters, Locale } from './lib/format.js';

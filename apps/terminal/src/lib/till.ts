@@ -57,6 +57,35 @@ export interface SaleView {
 	needsDrawer: boolean;
 }
 
+/**
+ * A shift as the close-out screen shows it.
+ *
+ * `expectedCashMinor` is zero on a blind count sheet — see `blindCountSheet`. Everything here is an
+ * exact integer from Rust; nothing on this screen adds two of them together.
+ */
+export interface ShiftView {
+	id: string;
+	cashier: string;
+	/** False while the shift runs — an X report rather than a Z. */
+	isFinal: boolean;
+	currency: string;
+	openingFloatMinor: number;
+	takingsMinor: number;
+	cashFromSalesMinor: number;
+	netMovementsMinor: number;
+	expectedCashMinor: number;
+	/** Absent until the drawer has been counted. */
+	countedCashMinor: number | null;
+	variance: 'balanced' | 'short' | 'over' | null;
+	varianceMinor: number | null;
+	saleCount: number;
+	voidCount: number;
+	countAttempts: number;
+}
+
+/** Why cash moved in or out of the drawer outside a sale. */
+export type CashReason = 'float_top_up' | 'skim' | 'petty_cash' | 'refund' | 'correction';
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -143,5 +172,32 @@ export const till = {
 
 	status: () => call<TillStatus>('till_status'),
 
-	syncStatus: () => call<SyncView>('sync_status')
+	syncStatus: () => call<SyncView>('sync_status'),
+
+	openShift: (cashierId: string, openingFloatMinor: number) =>
+		call<ShiftView>('open_shift', { cashierId, openingFloatMinor }),
+
+	moveCash: (input: {
+		amountMinor: number;
+		reason: CashReason;
+		note?: string | null;
+		authorizedBy: string;
+	}) => call<ShiftView>('move_cash', input),
+
+	countDrawer: (countedMinor: number, countedBy: string) =>
+		call<ShiftView>('count_drawer', { countedMinor, countedBy }),
+
+	/** The X report — where the shift stands, without ending it. */
+	shiftReport: () => call<ShiftView>('shift_report'),
+
+	/**
+	 * The same shift with every expectation withheld.
+	 *
+	 * A separate call rather than a flag, because the safest way to not leak the expected figure is
+	 * to never send it to this process.
+	 */
+	blindCountSheet: () => call<ShiftView>('blind_count_sheet'),
+
+	closeShift: (closedBy: string, closingCashMinor: number) =>
+		call<ShiftView>('close_shift', { closedBy, closingCashMinor })
 };

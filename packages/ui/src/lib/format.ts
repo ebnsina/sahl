@@ -153,6 +153,37 @@ function assertTimeZone(timeZone: string): void {
 }
 
 /**
+ * Parse a typed decimal string into exact minor units.
+ *
+ * The inverse of `minorToDecimalString`, and the only sanctioned way a keyboard entry becomes a
+ * number the till will act on. Returns `null` on anything malformed rather than a best guess — a
+ * cash amount the UI misread is a drawer that will not balance, and refusing is recoverable in a
+ * way a silent misparse is not.
+ *
+ * Digit manipulation, no float: `"499.5"` with exponent 2 becomes `49950`, not `499.5 * 100`.
+ */
+export function parseMinor(entry: string, currency: CurrencyCode): number | null {
+	assertCurrency(currency);
+	const exponent = CURRENCY_EXPONENT[currency];
+	const trimmed = entry.trim();
+
+	// `\d{1,n}` after the point, not `\d{0,n}`: a bare trailing dot is a half-typed entry, and
+	// reading "5." as five is a guess about what someone was about to type.
+	const pattern = new RegExp(`^-?\\d+(\\.\\d{1,${exponent}})?$`);
+	if (!pattern.test(trimmed)) return null;
+
+	const negative = trimmed.startsWith('-');
+	const [whole = '0', fraction = ''] = (negative ? trimmed.slice(1) : trimmed).split('.');
+	const digits = `${whole}${fraction.padEnd(exponent, '0')}`;
+
+	const value = Number(digits);
+	// Beyond this, integer arithmetic in JS stops being exact — and a money value that silently
+	// loses its last digit is precisely what this module exists to prevent.
+	if (!Number.isSafeInteger(value)) return null;
+	return negative ? -value : value;
+}
+
+/**
  * Build the formatters for a given outlet context.
  *
  * Validates eagerly and throws on bad configuration rather than rendering something plausible but
