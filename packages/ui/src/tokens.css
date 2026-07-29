@@ -229,7 +229,7 @@
 	 * line renders correctly with no code doing anything.
 	 */
 	--font-sans:
-		'Mona Sans', 'Tiro Bangla', 'IBM Plex Sans Arabic', system-ui, -apple-system, sans-serif;
+		'Mona Sans', 'Noto Serif Bengali', 'IBM Plex Sans Arabic', system-ui, -apple-system, sans-serif;
 	--font-mono: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
 
 	--text-label: var(--scale-label);

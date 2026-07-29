@@ -143,6 +143,20 @@
 					and Latin can share a line with no code involved:
 				</p>
 				<p class="text-md">চাল ৫ কেজি · أرز ٥ كيلو · Rice 5 kg</p>
+
+				<p class="text-secondary text-text-muted">
+					Every bundled face carries real weights. This row is here permanently because the failure
+					is silent: a single-weight font renders 600 as browser-synthesised bold, which closes the
+					counters on Bangla conjuncts at the sizes this UI actually uses.
+				</p>
+				<div class="flex flex-col gap-1">
+					{#each [400, 500, 600, 700] as weight (weight)}
+						<p class="text-md" style="font-weight: {weight}">
+							চাল ৫ কেজি · أرز ٥ كيلو · Rice 5 kg
+							<span class="text-secondary text-text-muted">— {weight}</span>
+						</p>
+					{/each}
+				</div>
 			</div>
 		</Card>
 

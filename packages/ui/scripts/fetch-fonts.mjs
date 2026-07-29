@@ -7,7 +7,7 @@
  * the point, not an oversight.
  *
  * Only the subsets each font is actually responsible for are fetched — Latin from Mona Sans and
- * Geist Mono, Bengali from Anek Bangla, Arabic from IBM Plex Sans Arabic — which keeps the terminal
+ * Geist Mono, Bengali from Noto Serif Bengali, Arabic from IBM Plex Sans Arabic — which keeps the terminal
  * binary small on the low-end hardware these merchants buy.
  *
  * Run with: pnpm --filter @sahl/ui fetch-fonts
@@ -46,13 +46,14 @@ const FAMILIES = [
 		role: 'all numerics, tabular'
 	},
 	{
-		family: 'Tiro Bangla',
-		query: 'Tiro+Bangla',
-		slug: 'tiro-bangla',
+		family: 'Noto Serif Bengali',
+		query: 'Noto+Serif+Bengali:wght@100..900',
+		slug: 'noto-serif-bengali',
 		subsets: ['bengali'],
-		// NOTE: Tiro Bangla ships a single weight (400) and no bold. Anywhere the UI asks for 500/600
-		// — buttons, labels, totals — Bangla text will be synthetically emboldened by the browser.
-		role: 'Bangla (single weight 400)'
+		// Variable, so one file covers the whole range. Replaced Tiro Bangla, which ships weight 400
+		// only: this UI leans on 500/600 constantly, and synthetic bold closes the counters on Bangla
+		// conjuncts at the 11-15px sizes the product lives at.
+		role: 'Bangla'
 	},
 	{
 		family: 'IBM Plex Sans Arabic',
