@@ -1,0 +1,21 @@
+[package]
+name = "sahl-sync"
+description = "Sync wire protocol and batch planning. Pure — no I/O, shared by terminal and server."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sahl-core = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

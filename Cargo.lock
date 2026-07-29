@@ -3095,6 +3095,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sahl-sync"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "sahl-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
 name = "sahl-terminal"
 version = "0.1.0"
 dependencies = [
