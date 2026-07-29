@@ -16,9 +16,12 @@
 		"format": "prettier --write .",
 		"rs:fmt": "cargo fmt --all",
 		"rs:lint": "cargo clippy --workspace --all-targets -- -D warnings",
-		"rs:test": "cargo test --workspace"
+		"rs:test": "cargo test --workspace",
+		"till": "tauri dev --config crates/sahl-terminal/tauri.conf.json",
+		"till:build": "tauri build --config crates/sahl-terminal/tauri.conf.json"
 	},
 	"devDependencies": {
+		"@tauri-apps/cli": "^2.11.4",
 		"prettier": "^3.9.6",
 		"prettier-plugin-svelte": "^4.1.1",
 		"prettier-plugin-tailwindcss": "^0.8.1"
