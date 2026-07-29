@@ -21,6 +21,7 @@
 
 pub mod commands;
 pub mod store;
+pub mod sync;
 pub mod terminal;
 
 pub use terminal::{DeviceIdentity, Terminal, TerminalError};
@@ -53,16 +54,15 @@ pub fn run() {
                 .map_err(|error| format!("no writable data directory: {error}"))?;
             std::fs::create_dir_all(&data_dir)?;
 
-            let store = EventStore::open(&data_dir.join("till.db"))
-                .map_err(|error| format!("cannot open the local event log: {error}"))?;
-
-            // TODO(P1): read the enrolled identity from the keychain. Fixed for now so the sell
-            // screen can be built and driven; enrollment lands with the sync client in P2.
+            // TODO(P2): read the enrolled identity from the keychain once enrollment is wired.
             let identity = DeviceIdentity {
                 tenant_id: uuid::Uuid::nil(),
                 outlet_id: uuid::Uuid::nil(),
                 device_id: uuid::Uuid::nil(),
             };
+
+            let store = EventStore::open(&data_dir.join("till.db"), identity.device_id)
+                .map_err(|error| format!("cannot open the local event log: {error}"))?;
 
             let terminal = Terminal::load(store, identity)
                 .map_err(|error| format!("the local event log is unusable: {error}"))?;

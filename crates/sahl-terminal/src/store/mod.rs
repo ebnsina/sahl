@@ -37,10 +37,12 @@ pub enum StoreError {
     SequenceBreak { tip: u64, found: u64 },
 }
 
-/// The device's append-only event log on disk.
+/// The till's event log: its own chain plus events pulled from sibling devices.
 #[derive(Debug)]
 pub struct EventStore {
     connection: Connection,
+    /// Whose chain is "ours". Sequence numbers only mean anything within one device.
+    device_id: Uuid,
 }
 
 impl EventStore {
@@ -48,24 +50,32 @@ impl EventStore {
     ///
     /// # Errors
     /// [`StoreError::Database`] if the file cannot be opened or the schema cannot be applied.
-    pub fn open(path: &Path) -> Result<Self, StoreError> {
+    pub fn open(path: &Path, device_id: Uuid) -> Result<Self, StoreError> {
         let connection = Connection::open(path)?;
-        Self::prepare(connection)
+        Self::prepare(connection, device_id)
     }
 
     /// An in-memory store, for tests.
     ///
     /// # Errors
     /// [`StoreError::Database`] on failure.
-    pub fn open_in_memory() -> Result<Self, StoreError> {
+    pub fn open_in_memory(device_id: Uuid) -> Result<Self, StoreError> {
         let connection = Connection::open_in_memory()?;
-        Self::prepare(connection)
+        Self::prepare(connection, device_id)
     }
 
-    fn prepare(connection: Connection) -> Result<Self, StoreError> {
+    fn prepare(connection: Connection, device_id: Uuid) -> Result<Self, StoreError> {
         connection.execute_batch(PRAGMAS)?;
         connection.execute_batch(SCHEMA)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            device_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn device_id(&self) -> Uuid {
+        self.device_id
     }
 
     /// Where the chain currently ends.
@@ -79,8 +89,9 @@ impl EventStore {
         let row: Option<(i64, Vec<u8>)> = self
             .connection
             .query_row(
-                "SELECT device_seq, hash FROM event ORDER BY device_seq DESC LIMIT 1",
-                [],
+                "SELECT device_seq, hash FROM event WHERE device_id = ?1 \
+                 ORDER BY device_seq DESC LIMIT 1",
+                [self.device_id.to_string()],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -130,8 +141,8 @@ impl EventStore {
         let inserted = self.connection.execute(
             "INSERT INTO event (
                 device_seq, event_id, tenant_id, outlet_id, device_id,
-                occurred_at, kind, payload, prev_hash, hash, synced_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+                occurred_at, kind, payload, prev_hash, hash, origin, synced_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'local', NULL)",
             params![
                 sequence,
                 event.event_id.to_string(),
@@ -166,7 +177,8 @@ impl EventStore {
     pub fn load_all(&self) -> Result<Vec<EventEnvelope>, StoreError> {
         self.query(
             "SELECT device_seq, event_id, tenant_id, outlet_id, device_id, occurred_at, \
-                    kind, payload, prev_hash, hash FROM event ORDER BY device_seq",
+                    kind, payload, prev_hash, hash FROM event WHERE origin = 'local' \
+                    ORDER BY device_seq",
         )
     }
 
@@ -177,8 +189,8 @@ impl EventStore {
     pub fn unsynced(&self) -> Result<Vec<EventEnvelope>, StoreError> {
         self.query(
             "SELECT device_seq, event_id, tenant_id, outlet_id, device_id, occurred_at, \
-                    kind, payload, prev_hash, hash FROM event WHERE synced_at IS NULL \
-                    ORDER BY device_seq",
+                    kind, payload, prev_hash, hash FROM event \
+                    WHERE origin = 'local' AND synced_at IS NULL ORDER BY device_seq",
         )
     }
 
@@ -188,7 +200,7 @@ impl EventStore {
     /// [`StoreError::Database`] on failure.
     pub fn unsynced_count(&self) -> Result<u64, StoreError> {
         let count: i64 = self.connection.query_row(
-            "SELECT count(*) FROM event WHERE synced_at IS NULL",
+            "SELECT count(*) FROM event WHERE origin = 'local' AND synced_at IS NULL",
             [],
             |row| row.get(0),
         )?;
@@ -202,9 +214,97 @@ impl EventStore {
     pub fn mark_synced(&mut self, through_seq: u64, at_millis: i64) -> Result<usize, StoreError> {
         let sequence = i64::try_from(through_seq).unwrap_or(i64::MAX);
         Ok(self.connection.execute(
-            "UPDATE event SET synced_at = ?1 WHERE device_seq <= ?2 AND synced_at IS NULL",
+            "UPDATE event SET synced_at = ?1 \
+             WHERE origin = 'local' AND device_seq <= ?2 AND synced_at IS NULL",
             params![at_millis, sequence],
         )?)
+    }
+
+    /// Store an event pulled from a sibling till.
+    ///
+    /// Idempotent: a re-delivered event is ignored rather than erroring. Pull pages can overlap
+    /// after a crash, and a till that chokes on seeing the same event twice stops syncing.
+    ///
+    /// Remote chains are *not* sequence-checked here. This device holds an arbitrary window of a
+    /// sibling's history — it may have missed earlier events entirely — so continuity is the
+    /// server's job, not a claim this store can make.
+    ///
+    /// # Errors
+    /// [`StoreError`] on a database failure.
+    pub fn insert_remote(
+        &mut self,
+        event: &EventEnvelope,
+        server_seq: i64,
+    ) -> Result<bool, StoreError> {
+        let payload =
+            serde_json::to_string(&event.payload).map_err(|error| StoreError::Corrupt {
+                event_id: event.event_id.to_string(),
+                reason: error.to_string(),
+            })?;
+
+        let seq = i64::try_from(event.device_seq).map_err(|_| StoreError::Corrupt {
+            event_id: event.event_id.to_string(),
+            reason: "sequence exceeds i64".to_owned(),
+        })?;
+
+        let inserted = self.connection.execute(
+            "INSERT OR IGNORE INTO event (
+                event_id, device_id, device_seq, tenant_id, outlet_id,
+                occurred_at, kind, payload, prev_hash, hash, origin, server_seq
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'remote', ?11)",
+            params![
+                event.event_id.to_string(),
+                event.device_id.to_string(),
+                seq,
+                event.tenant_id.to_string(),
+                event.outlet_id.to_string(),
+                event.occurred_at.millis(),
+                event.kind,
+                payload,
+                event.prev_hash.as_bytes().as_slice(),
+                event.hash.as_bytes().as_slice(),
+                server_seq,
+            ],
+        )?;
+        Ok(inserted > 0)
+    }
+
+    /// How far this device has drained the outlet stream.
+    ///
+    /// # Errors
+    /// [`StoreError::Database`] on failure.
+    pub fn pull_cursor(&self) -> Result<i64, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT pull_cursor FROM sync_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Advance the cursor. Never moves backwards — a stale response arriving late must not rewind
+    /// progress and cause the same page to be applied forever.
+    ///
+    /// # Errors
+    /// [`StoreError::Database`] on failure.
+    pub fn set_pull_cursor(&mut self, cursor: i64) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE sync_state SET pull_cursor = max(pull_cursor, ?1) WHERE id = 1",
+            params![cursor],
+        )?;
+        Ok(())
+    }
+
+    /// Every event, local and remote, in the order the projection should apply them.
+    ///
+    /// # Errors
+    /// [`StoreError`] on a database failure or corrupt row.
+    pub fn load_projection_input(&self) -> Result<Vec<EventEnvelope>, StoreError> {
+        // Ordered by when the event happened, then by id to break ties deterministically. Two tills
+        // sealing at the same millisecond must still replay identically on every device.
+        self.query(
+            "SELECT device_seq, event_id, tenant_id, outlet_id, device_id, occurred_at, \
+                    kind, payload, prev_hash, hash FROM event ORDER BY occurred_at, event_id",
+        )
     }
 
     fn query(&self, sql: &str) -> Result<Vec<EventEnvelope>, StoreError> {
@@ -299,7 +399,7 @@ mod tests {
     }
 
     fn seeded(count: u32) -> (EventStore, EventChain) {
-        let mut store = EventStore::open_in_memory().expect("opens");
+        let mut store = EventStore::open_in_memory(id(DEVICE)).expect("opens");
         let mut chain = EventChain::new(id(DEVICE));
         for n in 0..count {
             let event = chain.append(header(n), &Tick { n }).expect("appends");
@@ -310,7 +410,7 @@ mod tests {
 
     #[test]
     fn a_fresh_store_is_at_genesis() {
-        let store = EventStore::open_in_memory().expect("opens");
+        let store = EventStore::open_in_memory(id(DEVICE)).expect("opens");
         assert_eq!(store.tip().expect("tip"), ChainTip::GENESIS);
     }
 
@@ -356,7 +456,7 @@ mod tests {
     #[test]
     fn replaying_the_same_event_is_refused() {
         // Matters for crash recovery: a retry after a partial write must not double-append.
-        let mut store = EventStore::open_in_memory().expect("opens");
+        let mut store = EventStore::open_in_memory(id(DEVICE)).expect("opens");
         let mut chain = EventChain::new(id(DEVICE));
         let event = chain.append(header(0), &Tick { n: 0 }).expect("appends");
 
@@ -403,7 +503,7 @@ mod tests {
         let path = dir.join("till.db");
 
         {
-            let mut store = EventStore::open(&path).expect("opens");
+            let mut store = EventStore::open(&path, id(DEVICE)).expect("opens");
             let mut chain = EventChain::new(id(DEVICE));
             for n in 0..5 {
                 let event = chain.append(header(n), &Tick { n }).expect("appends");
@@ -411,7 +511,7 @@ mod tests {
             }
         }
 
-        let reopened = EventStore::open(&path).expect("reopens");
+        let reopened = EventStore::open(&path, id(DEVICE)).expect("reopens");
         assert_eq!(reopened.tip().expect("tip").device_seq, 5);
         assert!(verify_chain_from_genesis(&reopened.load_all().expect("loads")).is_ok());
 

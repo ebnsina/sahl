@@ -41,7 +41,7 @@ struct Till {
 impl Till {
     fn new() -> Self {
         let terminal = Terminal::load(
-            EventStore::open_in_memory().expect("opens"),
+            EventStore::open_in_memory(id(3)).expect("opens"),
             DeviceIdentity {
                 tenant_id: id(1),
                 outlet_id: id(2),

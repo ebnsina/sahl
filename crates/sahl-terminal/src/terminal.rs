@@ -186,7 +186,11 @@ mod tests {
     }
 
     fn fresh() -> Terminal {
-        Terminal::load(EventStore::open_in_memory().expect("opens"), identity()).expect("loads")
+        Terminal::load(
+            EventStore::open_in_memory(id(3)).expect("opens"),
+            identity(),
+        )
+        .expect("loads")
     }
 
     fn at(n: i64) -> Timestamp {
@@ -273,7 +277,7 @@ mod tests {
     #[test]
     fn a_terminal_reloads_to_the_same_state() {
         // The crash-recovery path: everything is rebuilt from disk, and must land byte-identically.
-        let store = EventStore::open_in_memory().expect("opens");
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
         let mut terminal = Terminal::load(store, identity()).expect("loads");
 
         terminal.record(&opened(), id(100), at(0)).expect("opens");
@@ -324,7 +328,7 @@ mod tests {
     fn a_tampered_log_is_refused_at_load() {
         // Catching this at startup is the point: the device must not write new events on top of a
         // chain that no longer holds.
-        let mut store = EventStore::open_in_memory().expect("opens");
+        let mut store = EventStore::open_in_memory(id(3)).expect("opens");
         let mut chain = EventChain::new(id(3));
         let header = EventHeader {
             event_id: id(100),

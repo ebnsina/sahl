@@ -1,49 +1,62 @@
 //! Local SQLite schema.
 //!
-//! Deliberately narrower than the server's: a terminal holds one device's chain for one outlet, so
-//! there is no tenancy to isolate here. The physical device *is* the boundary, which is why the
-//! file is encrypted at rest rather than row-secured.
+//! Narrower than the server's: one outlet, no tenancy to isolate. The device is the boundary, so
+//! the file is encrypted at rest rather than row-secured.
 
-/// Applied on every open. `IF NOT EXISTS` throughout, so opening an existing store is a no-op.
+/// Applied on every open. `IF NOT EXISTS` throughout, so reopening is a no-op.
 pub const SCHEMA: &str = r"
--- The device's own append-only chain. `device_seq` is the primary key, so it is both the ordering
--- and a guarantee that a sequence number cannot repeat.
+-- Every event the till knows about, its own and its siblings'.
+--
+-- Keyed by event_id rather than device_seq: sequence numbers are only unique *within* a device, and
+-- once a second till in the same shop syncs, its sequence 1 collides with this one's.
 CREATE TABLE IF NOT EXISTS event (
-    device_seq  INTEGER PRIMARY KEY,
-    event_id    TEXT    NOT NULL UNIQUE,
+    event_id    TEXT    PRIMARY KEY,
+    device_id   TEXT    NOT NULL,
+    device_seq  INTEGER NOT NULL,
     tenant_id   TEXT    NOT NULL,
     outlet_id   TEXT    NOT NULL,
-    device_id   TEXT    NOT NULL,
 
-    -- Milliseconds since the Unix epoch, matching sahl_core::Timestamp. An integer because this
-    -- value is hashed, and a formatted datetime has no single representation.
+    -- Milliseconds since the Unix epoch. An integer because this value is hashed.
     occurred_at INTEGER NOT NULL,
 
     kind        TEXT    NOT NULL,
-    -- Canonical JSON exactly as hashed. Stored verbatim so the digest can be recomputed byte for
-    -- byte; re-serialising on read would risk a different encoding and a chain that fails to verify.
+    -- Canonical JSON exactly as hashed, stored verbatim so the digest recomputes byte for byte.
     payload     TEXT    NOT NULL,
 
     prev_hash   BLOB    NOT NULL,
     hash        BLOB    NOT NULL,
 
-    -- NULL until the server has accepted it. This column is the entire sync queue: 'what have I not
-    -- pushed yet' is a WHERE clause, not a separate table that could drift out of step with the log.
-    synced_at   INTEGER
+    -- 'local' events this device sealed; 'remote' ones pulled from a sibling till.
+    origin      TEXT    NOT NULL CHECK (origin IN ('local', 'remote')),
+
+    -- Local only: NULL until the server accepts it. This column is the whole sync queue.
+    synced_at   INTEGER,
+    -- Remote only: position in the outlet stream, so the pull cursor can advance.
+    server_seq  INTEGER,
+
+    UNIQUE (device_id, device_seq)
 );
 
--- The push query: everything still outstanding, oldest first.
-CREATE INDEX IF NOT EXISTS event_unsynced_idx ON event (device_seq) WHERE synced_at IS NULL;
+-- The push queue: local events still outstanding, oldest first.
+CREATE INDEX IF NOT EXISTS event_unsynced_idx
+    ON event (device_seq) WHERE origin = 'local' AND synced_at IS NULL;
 
+CREATE INDEX IF NOT EXISTS event_chain_idx ON event (device_id, device_seq);
 CREATE INDEX IF NOT EXISTS event_kind_idx ON event (kind);
+
+-- Single-row table holding the pull cursor. The CHECK keeps it single-row.
+CREATE TABLE IF NOT EXISTS sync_state (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    pull_cursor INTEGER NOT NULL DEFAULT 0
+);
+
+INSERT OR IGNORE INTO sync_state (id, pull_cursor) VALUES (1, 0);
 ";
 
 /// Enforced on every connection.
 ///
-/// `foreign_keys` is off by default in SQLite, and `synchronous = FULL` costs a little throughput to
-/// guarantee a committed sale survives losing power mid-transaction — which in the target market is
-/// not a hypothetical. A till that loses the last sale in a blackout is exactly the failure this
-/// product exists to prevent.
+/// `synchronous = FULL` costs throughput to guarantee a committed sale survives losing power
+/// mid-transaction — not hypothetical in the target market.
 pub const PRAGMAS: &str = "
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = FULL;
