@@ -5,6 +5,7 @@ use crate::event::EventPayload;
 use crate::money::{Currency, Money, Rounding};
 use crate::quantity::Quantity;
 use crate::tax::{Discount, PricingMode, TaxClass};
+use crate::time::Timestamp;
 
 use super::line::VoidReason;
 use super::tender::TenderMethod;
@@ -95,6 +96,19 @@ pub enum SaleEvent {
         change_given: Money,
     },
 
+    /// A device takes ownership of the ticket.
+    ///
+    /// Carries `at` in the payload rather than reading the envelope, because the claim time is part
+    /// of how a contest is resolved and must travel with the claim itself.
+    TicketClaimed {
+        sale_id: Uuid,
+        device_id: Uuid,
+        at: Timestamp,
+    },
+
+    /// The holder gives the ticket up — handing a table over, or closing a shift.
+    TicketReleased { sale_id: Uuid, device_id: Uuid },
+
     /// The ticket is dropped without payment — a walkout, or a cart abandoned at close.
     ///
     /// Recorded rather than deleted: an abandoned ticket full of scanned goods is itself a signal
@@ -113,6 +127,8 @@ impl SaleEvent {
             | Self::LineDiscounted { sale_id, .. }
             | Self::LineVoided { sale_id, .. }
             | Self::OrderDiscounted { sale_id, .. }
+            | Self::TicketClaimed { sale_id, .. }
+            | Self::TicketReleased { sale_id, .. }
             | Self::TenderRecorded { sale_id, .. }
             | Self::Completed { sale_id, .. }
             | Self::Abandoned { sale_id, .. } => *sale_id,
@@ -129,6 +145,8 @@ impl EventPayload for SaleEvent {
             Self::LineDiscounted { .. } => "sale.line_discounted",
             Self::LineVoided { .. } => "sale.line_voided",
             Self::OrderDiscounted { .. } => "sale.order_discounted",
+            Self::TicketClaimed { .. } => "sale.ticket_claimed",
+            Self::TicketReleased { .. } => "sale.ticket_released",
             Self::TenderRecorded { .. } => "sale.tender_recorded",
             Self::Completed { .. } => "sale.completed",
             Self::Abandoned { .. } => "sale.abandoned",

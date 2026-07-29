@@ -66,6 +66,7 @@ impl From<TerminalError> for CommandError {
         let code = match &error {
             TerminalError::CorruptLog { .. } => "corrupt_log",
             TerminalError::UnknownSale { .. } => "unknown_sale",
+            TerminalError::TicketHeld { .. } => "ticket_held",
             TerminalError::Store(_) => "storage",
             TerminalError::Event(_) => "event",
             TerminalError::Sale(_) => "rejected",

@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::money::{Currency, Money, Rounding};
+use crate::policy::lease::{ClaimVerdict, TicketLease, evaluate_claim};
 use crate::tax::{self, Discount, OrderInput, OrderTotals, PricingMode};
+use crate::time::Timestamp;
 
 use super::error::SaleError;
 use super::event::SaleEvent;
@@ -53,6 +55,8 @@ pub struct Sale {
     /// engine's configuration changes later.
     settled_total: Option<Money>,
     change_given: Option<Money>,
+    /// Which device owns this ticket, if any. Only meaningful while open.
+    lease: Option<TicketLease>,
 }
 
 impl Sale {
@@ -98,6 +102,7 @@ impl Sale {
             tenders: Vec::new(),
             settled_total: None,
             change_given: None,
+            lease: None,
         })
     }
 
@@ -178,6 +183,31 @@ impl Sale {
                     reason: *reason,
                     authorized_by: *authorized_by,
                 });
+            }
+
+            SaleEvent::TicketClaimed {
+                sale_id,
+                device_id,
+                at,
+            } => {
+                // Claims are recorded unconditionally. Refusing one here would mean a valid log
+                // failed to replay on the server, which is where two contested claims necessarily
+                // meet; `resolve_contest` decides the winner, not this.
+                let claim = TicketLease::new(*sale_id, *device_id, *at);
+                self.lease = Some(match self.lease {
+                    Some(held) if held.holder != *device_id => {
+                        crate::policy::lease::resolve_contest(&held, &claim)
+                    }
+                    _ => claim,
+                });
+            }
+
+            SaleEvent::TicketReleased { device_id, .. } => {
+                // Only the holder can release. A release from anyone else is a stale message that
+                // arrived after they already lost the ticket.
+                if self.lease.is_some_and(|held| held.holder == *device_id) {
+                    self.lease = None;
+                }
             }
 
             SaleEvent::OrderDiscounted { discount, .. } => {
@@ -371,6 +401,21 @@ impl Sale {
     #[must_use]
     pub const fn id(&self) -> Uuid {
         self.id
+    }
+
+    /// Who holds this ticket, if anyone.
+    #[must_use]
+    pub const fn lease(&self) -> Option<TicketLease> {
+        self.lease
+    }
+
+    /// Whether `device` may append to this ticket.
+    ///
+    /// Consulted before writing, not during replay: replay must accept whatever actually happened,
+    /// including a contest that should never have occurred.
+    #[must_use]
+    pub fn may_write(&self, device: Uuid, now: Timestamp) -> ClaimVerdict {
+        evaluate_claim(self.lease.as_ref(), device, now)
     }
 
     #[must_use]

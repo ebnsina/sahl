@@ -13,6 +13,7 @@
 //! not have. A till that shows a sale it did not persist is worse than one that refuses the sale.
 
 use sahl_core::event::{EventChain, EventEnvelope, EventHeader};
+use sahl_core::policy::lease::ClaimVerdict;
 use sahl_core::projection::SaleBook;
 use sahl_core::sale::{Sale, SaleError, SaleEvent};
 use sahl_core::{Money, Timestamp};
@@ -43,6 +44,10 @@ pub enum TerminalError {
 
     #[error("no sale {sale_id}")]
     UnknownSale { sale_id: Uuid },
+
+    /// Another device holds this ticket and is still working on it.
+    #[error("ticket {sale_id} is held by another device")]
+    TicketHeld { sale_id: Uuid, holder: Uuid },
 
     /// The stored log did not verify on load. Not recoverable at the till: the device must sync
     /// what it can and be re-enrolled, because nothing it reports afterwards can be trusted.
@@ -104,6 +109,13 @@ impl Terminal {
         event_id: Uuid,
         occurred_at: Timestamp,
     ) -> Result<EventEnvelope, TerminalError> {
+        // 0. Refuse to write to a ticket another device is actively holding.
+        //
+        //    Checked here rather than in the aggregate on purpose: replay must accept whatever
+        //    actually happened, including a contest that should never have occurred. This is the
+        //    layer that knows which device is acting, so it is the layer that can decline.
+        self.assert_may_write(event, occurred_at)?;
+
         // 1. Validate against a throwaway copy first. If this fails, nothing has been written and
         //    the till is exactly as it was — which is what lets the UI surface an error without
         //    having to undo anything.
@@ -126,6 +138,33 @@ impl Terminal {
         // 4. Only now adopt the new state.
         self.book = candidate;
         Ok(envelope)
+    }
+
+    /// Refuse a write to a ticket held by an active sibling.
+    ///
+    /// A claim is always allowed through — that is the request to take it, and a contest is settled
+    /// by `resolve_contest` once both reach the server.
+    fn assert_may_write(&self, event: &SaleEvent, now: Timestamp) -> Result<(), TerminalError> {
+        if matches!(
+            event,
+            SaleEvent::Opened { .. } | SaleEvent::TicketClaimed { .. }
+        ) {
+            return Ok(());
+        }
+
+        let Some(sale) = self.book.get(event.sale_id()) else {
+            return Ok(());
+        };
+
+        // No lease means nobody claimed it — the ordinary retail case, where a ticket opens and
+        // closes on one till and leases never come up at all.
+        if let ClaimVerdict::Held { holder } = sale.may_write(self.identity.device_id, now) {
+            return Err(TerminalError::TicketHeld {
+                sale_id: event.sale_id(),
+                holder,
+            });
+        }
+        Ok(())
     }
 
     /// Run one sync round against this till's store.

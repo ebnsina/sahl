@@ -32,8 +32,8 @@ fn bdt(minor: i64) -> Money {
 }
 
 struct Till {
-    terminal: Terminal,
-    sale_id: Uuid,
+    pub terminal: Terminal,
+    pub sale_id: Uuid,
     clock: i64,
     counter: u128,
 }
@@ -280,4 +280,103 @@ fn every_amount_the_screen_shows_is_an_exact_integer() {
     }
     walk(&json, &mut checked);
     assert!(checked > 10, "expected many numeric fields, saw {checked}");
+}
+
+// --- Ticket leases at the till ---------------------------------------------------------------
+
+use sahl_core::Timestamp as Clock;
+
+/// A second till in the same shop, sharing nothing but the events it is given.
+fn sibling_till() -> Till {
+    let mut till = Till::new();
+    till.terminal = Terminal::load(
+        EventStore::open_in_memory(id(4)).expect("opens"),
+        DeviceIdentity {
+            tenant_id: id(1),
+            outlet_id: id(2),
+            device_id: id(4),
+        },
+    )
+    .expect("loads");
+    till
+}
+
+#[test]
+fn a_till_refuses_to_write_to_a_ticket_another_device_holds() {
+    // Two waiters must not both be adding to one table's order.
+    let mut ours = Till::new();
+    ours.open();
+    ours.record(SaleEvent::TicketClaimed {
+        sale_id: ours.sale_id,
+        device_id: id(99),
+        at: Clock::from_millis(1_753_000_000_000),
+    });
+
+    let refused = ours.terminal.record(
+        &SaleEvent::LineAdded {
+            sale_id: ours.sale_id,
+            line_id: id(77),
+            product_id: id(78),
+            name: "Sneaked in".to_owned(),
+            unit_price: bdt(1_000),
+            quantity: Quantity::ONE,
+            tax_class: TaxClass::standard(1500),
+        },
+        id(0xF00),
+        Clock::from_millis(1_753_000_060_000),
+    );
+
+    assert!(refused.is_err(), "a held ticket is not writable");
+}
+
+#[test]
+fn a_till_may_always_write_to_a_ticket_it_holds() {
+    let mut ours = Till::new();
+    ours.open();
+    ours.record(SaleEvent::TicketClaimed {
+        sale_id: ours.sale_id,
+        device_id: id(3),
+        at: Clock::from_millis(1_753_000_000_000),
+    });
+
+    let view = ours.add(1, "Rice", 48_000, 1_000, 1500);
+    assert_eq!(view.total_minor, 48_000);
+}
+
+#[test]
+fn an_unclaimed_ticket_stays_writable_so_retail_is_unaffected() {
+    // Leases exist for cafe floors. A retail till that never claims anything must not notice them.
+    let mut ours = Till::new();
+    ours.open();
+    let view = ours.add(1, "Rice", 48_000, 1_000, 1500);
+
+    assert_eq!(view.total_minor, 48_000);
+}
+
+#[test]
+fn a_sibling_till_can_take_an_idle_ticket() {
+    // Eleven minutes of silence, past the ten-minute idle timeout.
+    let mut ours = sibling_till();
+    ours.open();
+    ours.record(SaleEvent::TicketClaimed {
+        sale_id: ours.sale_id,
+        device_id: id(99),
+        at: Clock::from_millis(1_753_000_000_000),
+    });
+
+    let taken = ours.terminal.record(
+        &SaleEvent::LineAdded {
+            sale_id: ours.sale_id,
+            line_id: id(88),
+            product_id: id(89),
+            name: "Picked up".to_owned(),
+            unit_price: bdt(2_000),
+            quantity: Quantity::ONE,
+            tax_class: TaxClass::standard(1500),
+        },
+        id(0xF01),
+        Clock::from_millis(1_753_000_000_000 + 11 * 60 * 1_000),
+    );
+
+    assert!(taken.is_ok(), "an abandoned ticket can be picked up");
 }

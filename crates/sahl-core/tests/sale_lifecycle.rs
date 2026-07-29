@@ -438,3 +438,113 @@ fn a_fully_comped_sale_closes_with_no_tender_at_all() {
         "no cash moved, so the drawer stays shut"
     );
 }
+
+// --- Ticket leases -------------------------------------------------------------------------
+
+use sahl_core::Timestamp;
+use sahl_core::policy::lease::ClaimVerdict;
+
+const WAITER_A: u128 = 0xA;
+const WAITER_B: u128 = 0xB;
+
+fn minute(n: i64) -> Timestamp {
+    Timestamp::from_millis(1_753_000_000_000 + n * 60 * 1_000)
+}
+
+fn claim(device: u128, at_minute: i64) -> SaleEvent {
+    SaleEvent::TicketClaimed {
+        sale_id: id(SALE),
+        device_id: id(device),
+        at: minute(at_minute),
+    }
+}
+
+#[test]
+fn an_unclaimed_ticket_is_writable_by_anyone() {
+    // The ordinary retail case: a ticket opens and closes on one till and leases never come up.
+    let sale = Sale::replay(&[opened(), line(1, "Bread", 5_500, 1_000)]).expect("valid");
+
+    assert_eq!(sale.lease(), None);
+    assert_eq!(sale.may_write(id(WAITER_B), minute(0)), ClaimVerdict::Free);
+}
+
+#[test]
+fn a_claim_gives_the_ticket_to_one_waiter() {
+    let sale = Sale::replay(&[opened(), claim(WAITER_A, 0)]).expect("valid");
+
+    assert_eq!(sale.lease().expect("held").holder, id(WAITER_A));
+    assert_eq!(
+        sale.may_write(id(WAITER_A), minute(1)),
+        ClaimVerdict::AlreadyHeld
+    );
+    assert_eq!(
+        sale.may_write(id(WAITER_B), minute(1)),
+        ClaimVerdict::Held {
+            holder: id(WAITER_A)
+        }
+    );
+}
+
+#[test]
+fn an_idle_ticket_becomes_takeable_but_contested() {
+    let sale = Sale::replay(&[opened(), claim(WAITER_A, 0)]).expect("valid");
+    let verdict = sale.may_write(id(WAITER_B), minute(11));
+
+    assert!(verdict.permits_claim());
+    assert!(
+        verdict.is_contested(),
+        "the UI must warn before firing a course"
+    );
+}
+
+#[test]
+fn a_contested_claim_replays_to_the_same_holder_either_way() {
+    // Both devices and the server see these two claims in whatever order sync delivers them, and
+    // must land on the same waiter. Earliest wins.
+    let forwards =
+        Sale::replay(&[opened(), claim(WAITER_B, 3), claim(WAITER_A, 7)]).expect("valid");
+    let backwards =
+        Sale::replay(&[opened(), claim(WAITER_A, 7), claim(WAITER_B, 3)]).expect("valid");
+
+    assert_eq!(forwards.lease().expect("held").holder, id(WAITER_B));
+    assert_eq!(backwards.lease().expect("held").holder, id(WAITER_B));
+}
+
+#[test]
+fn replay_accepts_a_contest_rather_than_refusing_it() {
+    // A valid log must always replay. Refusing here would mean the server could not ingest a batch
+    // describing something that genuinely happened.
+    assert!(Sale::replay(&[opened(), claim(WAITER_A, 0), claim(WAITER_B, 0)]).is_ok());
+}
+
+#[test]
+fn the_holder_can_hand_the_ticket_over() {
+    let sale = Sale::replay(&[
+        opened(),
+        claim(WAITER_A, 0),
+        SaleEvent::TicketReleased {
+            sale_id: id(SALE),
+            device_id: id(WAITER_A),
+        },
+    ])
+    .expect("valid");
+
+    assert_eq!(sale.lease(), None);
+    assert_eq!(sale.may_write(id(WAITER_B), minute(1)), ClaimVerdict::Free);
+}
+
+#[test]
+fn a_release_from_a_waiter_who_lost_the_ticket_is_ignored() {
+    // A stale message arriving after they already lost it must not free someone else's ticket.
+    let sale = Sale::replay(&[
+        opened(),
+        claim(WAITER_A, 0),
+        SaleEvent::TicketReleased {
+            sale_id: id(SALE),
+            device_id: id(WAITER_B),
+        },
+    ])
+    .expect("valid");
+
+    assert_eq!(sale.lease().expect("still held").holder, id(WAITER_A));
+}
