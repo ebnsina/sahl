@@ -29,5 +29,12 @@
 )]
 
 pub mod money;
+pub mod quantity;
+pub mod tax;
 
 pub use money::{Currency, Money, MoneyError, Rate, Rounding};
+pub use quantity::Quantity;
+pub use tax::{
+    Discount, LineInput, LineTotals, OrderInput, OrderTotals, PricingMode, TaxClass, TaxError,
+    TaxGroup, calculate,
+};
