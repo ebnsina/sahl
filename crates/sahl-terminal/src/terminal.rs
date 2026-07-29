@@ -380,6 +380,7 @@ mod tests {
                     sale_id: id(SALE),
                     total: Money::from_minor(48_000, BDT),
                     change_given: Money::from_minor(0, BDT),
+                    at: at(3),
                 },
                 id(103),
                 at(3),

@@ -332,6 +332,9 @@ pub fn complete_sale(state: tauri::State<'_, TerminalState>, sale_id: Uuid) -> C
             sale_id,
             total,
             change_given: change,
+            // The completion time attributes the sale to a shift, so it comes from the till's
+            // clock at the moment of closing, not from the UI.
+            at: now(),
         },
     )
 }

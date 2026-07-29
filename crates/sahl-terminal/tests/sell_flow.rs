@@ -228,6 +228,7 @@ fn a_completed_sale_reports_what_was_paid() {
         sale_id,
         total: bdt(48_000),
         change_given: bdt(2_000),
+        at: Timestamp::from_millis(1_753_000_000_000),
     });
 
     assert_eq!(view.status, "completed");

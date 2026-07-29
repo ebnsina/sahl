@@ -68,6 +68,7 @@ fn completed(total: i64, change: i64) -> SaleEvent {
         sale_id: id(SALE),
         total: bdt(total),
         change_given: bdt(change),
+        at: Timestamp::from_millis(1_753_000_000_000),
     }
 }
 

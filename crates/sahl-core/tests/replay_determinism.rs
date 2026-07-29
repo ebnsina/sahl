@@ -17,6 +17,7 @@
 )]
 
 use proptest::prelude::*;
+use sahl_core::Timestamp;
 use sahl_core::money::{Currency, Money, Rounding};
 use sahl_core::projection::SaleBook;
 use sahl_core::quantity::Quantity;
@@ -137,6 +138,7 @@ fn events_for(ticket: &Ticket, seq: u128) -> Vec<SaleEvent> {
             sale_id: id(sale),
             total,
             change_given: bdt(0),
+            at: Timestamp::from_millis(1_753_000_000_000),
         });
         return events;
     }
@@ -173,6 +175,7 @@ fn events_for(ticket: &Ticket, seq: u128) -> Vec<SaleEvent> {
         sale_id: id(sale),
         total,
         change_given: bdt(0),
+        at: Timestamp::from_millis(1_753_000_000_000),
     });
     events
 }

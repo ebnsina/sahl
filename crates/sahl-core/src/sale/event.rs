@@ -94,6 +94,9 @@ pub enum SaleEvent {
         /// Cash handed back. Derived at completion and recorded, because the drawer count at shift
         /// close has to reconcile against what was actually given.
         change_given: Money,
+        /// When it closed. Carried here rather than read from the envelope because this is what
+        /// attributes the sale to a shift, and that must survive replay on any device.
+        at: Timestamp,
     },
 
     /// A device takes ownership of the ticket.

@@ -55,6 +55,7 @@ pub struct Sale {
     /// engine's configuration changes later.
     settled_total: Option<Money>,
     change_given: Option<Money>,
+    settled_at: Option<Timestamp>,
     /// Which device owns this ticket, if any. Only meaningful while open.
     lease: Option<TicketLease>,
 }
@@ -102,6 +103,7 @@ impl Sale {
             tenders: Vec::new(),
             settled_total: None,
             change_given: None,
+            settled_at: None,
             lease: None,
         })
     }
@@ -236,6 +238,7 @@ impl Sale {
             SaleEvent::Completed {
                 total,
                 change_given,
+                at,
                 ..
             } => {
                 if self.status != SaleStatus::Open {
@@ -270,6 +273,7 @@ impl Sale {
 
                 self.settled_total = Some(*total);
                 self.change_given = Some(*change_given);
+                self.settled_at = Some(*at);
                 self.status = SaleStatus::Completed;
             }
 
@@ -458,6 +462,12 @@ impl Sale {
     #[must_use]
     pub const fn change_given(&self) -> Option<Money> {
         self.change_given
+    }
+
+    /// When the sale closed — what attributes it to a shift.
+    #[must_use]
+    pub const fn settled_at(&self) -> Option<Timestamp> {
+        self.settled_at
     }
 
     /// How many lines were voided — the raw material for the void-rate anomaly signal.

@@ -144,6 +144,7 @@ fn ring_sale(terminal: &mut Terminal, n: u32) -> i64 {
         sale_id,
         total: Money::from_minor(total, BDT),
         change_given: Money::from_minor(0, BDT),
+        at: Timestamp::from_millis(clock + 4),
     });
 
     total

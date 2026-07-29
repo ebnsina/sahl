@@ -187,6 +187,7 @@ mod tests {
                 sale_id: id(sale),
                 total: bdt(minor),
                 change_given: bdt(0),
+                at: crate::Timestamp::from_millis(1_753_000_000_000),
             },
         ]
     }
