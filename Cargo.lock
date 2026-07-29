@@ -3063,6 +3063,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sahl-escpos"
+version = "0.1.0"
+dependencies = [
+ "sahl-core",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "sahl-server"
 version = "0.1.0"
 dependencies = [

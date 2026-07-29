@@ -1,0 +1,15 @@
+[package]
+name = "sahl-escpos"
+description = "ESC/POS receipt rendering. Pure byte generation — no I/O, no device access."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+sahl-core = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

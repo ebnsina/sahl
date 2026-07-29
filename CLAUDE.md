@@ -32,6 +32,18 @@ docs/                  gitignored — plans and research, never committed
   financial defect, not a lint nit.
 - Splitting money must not lose or invent a cent. Use the allocation helpers; never divide and round.
 
+## Comments
+
+**One line, two at most.** Say the non-obvious *why*, then stop. If a rule needs a paragraph it
+belongs in a doc file, not above a function. Don't restate what the code says.
+
+```rust
+// Bad: three sentences explaining what a reader can see.
+// Good: Only cash can over-tender — change against a card charge takes real money out of the till.
+```
+
+Same for doc comments: one line of summary, `# Errors` where it applies, nothing more.
+
 ## Rust
 
 - `unwrap`/`expect`/`panic`/`todo` are `deny` outside tests. Return typed errors (`thiserror`).
