@@ -18,5 +18,6 @@
 pub mod config;
 pub mod db;
 pub mod device;
+pub mod sync;
 
 pub use config::{Config, ConfigError};

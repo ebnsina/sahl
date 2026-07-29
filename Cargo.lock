@@ -3080,6 +3080,7 @@ dependencies = [
  "hex",
  "rand 0.9.5",
  "sahl-core",
+ "sahl-sync",
  "serde",
  "serde_json",
  "sha2 0.10.9",

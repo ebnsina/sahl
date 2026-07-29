@@ -11,7 +11,8 @@ repository = "https://github.com/ebnsina/sahl"
 
 [workspace.dependencies]
 sahl-core = { path = "crates/sahl-core" }
-sahl-fiscal = { path = "crates/sahl-fiscal" }
+sahl-sync = { path = "crates/sahl-sync" }
+sahl-escpos = { path = "crates/sahl-escpos" }
 
 serde = { version = "1", features = ["derive"] }
 # NOTE: `preserve_order` is deliberately NOT enabled. Without it, `serde_json::Value` objects are

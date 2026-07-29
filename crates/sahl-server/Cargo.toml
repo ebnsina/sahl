@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 sahl-core = { workspace = true }
+sahl-sync = { workspace = true }
 
 axum = { workspace = true }
 tokio = { workspace = true }
@@ -30,6 +31,9 @@ subtle = { workspace = true }
 
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true
