@@ -34,3 +34,6 @@ coverage/
 *.profraw
 # NOTE: proptest-regressions/ is deliberately NOT ignored — those files pin the
 # exact seeds that once broke the money math. Losing them loses the regression.
+
+# Tauri generated mobile projects
+crates/sahl-terminal/gen/

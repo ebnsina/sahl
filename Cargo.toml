@@ -42,6 +42,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 subtle = "2"
 
+# terminal
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }
+# Pinned to 0.39 deliberately: it resolves libsqlite3-sys to 0.37, which is inside the range
+# sqlx-sqlite accepts. Both crates declare `links = "sqlite3"`, so they must share one native
+# package — rusqlite 0.40 wants libsqlite3-sys 0.38 and the workspace will not resolve.
+rusqlite = { version = "0.39", features = ["bundled", "uuid"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
