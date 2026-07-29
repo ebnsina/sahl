@@ -43,11 +43,23 @@ jobs:
       # sahl-terminal pulls in Tauri, which links GTK and WebKit. The till itself ships on Windows
       # and Android, but CI still compiles it here to catch ordinary Rust errors.
       - name: Install Tauri system libraries
+        # Timed out and retried: a hung apt mirror blocked a run for twenty minutes, and an
+        # infrastructure stall should fail fast and try again rather than hold the whole pipeline.
+        # DEBIAN_FRONTEND stops any package stopping to ask a question nobody is there to answer.
+        timeout-minutes: 6
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-            librsvg2-dev libxdo-dev libssl-dev
+          for attempt in 1 2 3; do
+            if sudo -E apt-get update -qq && sudo -E apt-get install -y -qq --no-install-recommends \
+                 libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+                 librsvg2-dev libxdo-dev libssl-dev; then
+              exit 0
+            fi
+            echo "attempt $attempt failed, retrying"
+            sleep 5
+          done
+          exit 1
 
       - name: Install toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
@@ -88,6 +100,9 @@ jobs:
       # Includes the property suites (money allocation laws, VAT invariants, chain-integrity
       # fuzzing) and the sync ingest suite against the database above.
       - name: Test
+        # Bounded so a deadlock in the sync threads surfaces as a failure rather than a job that
+        # silently runs until the platform kills it.
+        timeout-minutes: 15
         env:
           SAHL_TEST_DATABASE_URL: postgres://sahl_app:ci@localhost:5432/sahl_ci
         run: cargo test --workspace
