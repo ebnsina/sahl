@@ -128,6 +128,15 @@ impl Terminal {
         Ok(envelope)
     }
 
+    /// Split into store and projection, so the sync loop can drive the store directly.
+    ///
+    /// Sync needs `&mut EventStore` while the till holds it; handing the parts over is simpler and
+    /// more honest than lending a mutable interior reference through the aggregate.
+    #[must_use]
+    pub fn into_parts(self) -> (EventStore, SaleBook) {
+        (self.store, self.book)
+    }
+
     #[must_use]
     pub const fn identity(&self) -> DeviceIdentity {
         self.identity

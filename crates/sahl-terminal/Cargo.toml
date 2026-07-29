@@ -22,10 +22,20 @@ sahl-sync = { workspace = true }
 tauri = { workspace = true }
 rusqlite = { workspace = true }
 
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+
+[dev-dependencies]
+sahl-server = { path = "../sahl-server" }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+sqlx = { workspace = true }
 
 [lints]
 workspace = true

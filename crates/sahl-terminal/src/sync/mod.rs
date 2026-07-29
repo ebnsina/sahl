@@ -5,5 +5,7 @@
 //! reduces risk.
 
 mod engine;
+mod http;
 
 pub use engine::{SyncClientError, SyncOutcome, Transport, sync_once};
+pub use http::HttpTransport;
