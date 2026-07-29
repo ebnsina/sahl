@@ -393,12 +393,20 @@
 										<div class="text-secondary text-text-secondary flex justify-between">
 											<span>
 												{group.class === 'exempt'
-													? 'Exempt'
+													? 'Exempt supplies'
 													: group.class === 'zero_rated'
-														? 'Zero-rated'
+														? 'Zero-rated supplies'
 														: `VAT ${format.percent(group.basisPoints)}`}
 											</span>
-											<Numeric value={format.moneyPlain(group.taxMinor)} class="text-secondary" />
+											<!-- A taxed class shows what was charged; a nil-rated one shows the value of
+											     the supply, because its tax is always zero and printing that tells
+											     nobody anything. Same split as Mushak columns 6 and 9. -->
+											<Numeric
+												value={format.moneyPlain(
+													group.class === 'standard' ? group.taxMinor : group.taxableBaseMinor
+												)}
+												class="text-secondary"
+											/>
 										</div>
 									{/each}
 
