@@ -279,6 +279,9 @@
 			>
 			<a href="/shift" class="text-secondary text-text-secondary hover:text-text underline">Shift</a
 			>
+			<a href="/staff" class="text-secondary text-text-secondary hover:text-text underline">
+				Staff
+			</a>
 			<a href="/" class="text-secondary text-text-secondary hover:text-text underline">
 				Sell screen
 			</a>

@@ -1588,4 +1588,33 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn only_an_owner_can_enrol_anyone() {
+        // The reason the first person must be an owner: a shop whose only account is a cashier can
+        // never add a second, and there is no way out short of editing the event log by hand.
+        let till = staffed();
+
+        assert!(matches!(
+            till.approve(Permission::ManageStaff, "5294"),
+            Err(TerminalError::NoApprover)
+        ));
+    }
+
+    #[test]
+    fn an_owner_pin_can_enrol() {
+        let mut till = fresh();
+        till.record_staff(
+            &enrolled(0x0E, "Bashir", sahl_core::staff::Role::Owner, "7712"),
+            id(60),
+            at(0),
+        )
+        .expect("enrols the first");
+
+        assert_eq!(
+            till.approve(Permission::ManageStaff, "7712")
+                .expect("approves"),
+            id(0x0E)
+        );
+    }
 }

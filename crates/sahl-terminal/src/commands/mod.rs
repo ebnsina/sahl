@@ -838,6 +838,16 @@ pub fn enrol_staff(
     // The first person enrolled cannot be approved by anyone — there is nobody yet. After that,
     // managing staff is an owner's job and the PIN has to prove it.
     let enrolled_by = if terminal.staff().is_empty() {
+        // ...and they must be an owner. Only an owner can enrol anyone, so a first cashier would
+        // leave the outlet permanently unable to add staff — with no way out short of editing the
+        // event log by hand.
+        if !matches!(role, Role::Owner) {
+            return Err(CommandError {
+                code: "first_must_be_owner",
+                message: "the first person enrolled must be an owner — nobody else can add staff"
+                    .to_owned(),
+            });
+        }
         Uuid::nil()
     } else {
         terminal.approve(Permission::ManageStaff, &pin)?
