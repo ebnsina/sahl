@@ -30,6 +30,7 @@
 
 pub mod event;
 pub mod money;
+pub mod projection;
 pub mod quantity;
 pub mod sale;
 pub mod tax;
@@ -40,6 +41,7 @@ pub use event::{
     verify_chain, verify_chain_from_genesis,
 };
 pub use money::{Currency, Money, MoneyError, Rate, Rounding};
+pub use projection::SaleBook;
 pub use quantity::Quantity;
 pub use sale::{Sale, SaleError, SaleEvent, SaleLine, SaleStatus, TenderMethod, VoidReason};
 pub use tax::{

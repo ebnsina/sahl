@@ -410,3 +410,31 @@ fn the_drawer_opens_only_when_cash_was_involved() {
     .expect("valid");
     assert!(with_cash.needs_drawer());
 }
+
+#[test]
+fn a_fully_comped_sale_closes_with_no_tender_at_all() {
+    // Surfaced by the replay-determinism generator rather than designed for: a discount can take a
+    // basket to exactly zero — a staff meal, a promotional giveaway, a goodwill write-off. Handing
+    // over nothing is not a payment, so there is no tender event; a zero balance simply is not
+    // outstanding, and the sale closes.
+    let sale = Sale::replay(&[
+        opened(),
+        line(1, "Bread", 5_500, 1_000),
+        SaleEvent::OrderDiscounted {
+            sale_id: id(SALE),
+            discount: Discount::Amount { amount: bdt(5_500) },
+            authorized_by: id(0x11A),
+        },
+        completed(0, 0),
+    ])
+    .expect("a comped sale is valid");
+
+    assert_eq!(sale.status(), SaleStatus::Completed);
+    assert_eq!(sale.settled_total(), Some(bdt(0)));
+    assert!(sale.tenders().is_empty());
+    assert_eq!(sale.net_cash(), Ok(bdt(0)));
+    assert!(
+        !sale.needs_drawer(),
+        "no cash moved, so the drawer stays shut"
+    );
+}

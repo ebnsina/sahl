@@ -38,7 +38,7 @@ impl SaleStatus {
 ///
 /// Totals are never cached. They are recomputed from the lines through the VAT engine every time,
 /// so a sale's displayed total and its receipt cannot drift apart.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sale {
     id: Uuid,
     status: SaleStatus,

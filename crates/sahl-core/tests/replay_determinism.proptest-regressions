@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 66660b37a0bd66dac456c7b40d2aa166f55aea3bd61a4cd474817fcc921925d9 # shrinks to events = [Opened { sale_id: 00000000-0000-0000-0000-0000000003e8, opened_by: 00000000-0000-0000-0000-00000000ca51, currency: Bdt, pricing_mode: TaxInclusive, rounding: HalfUp }, LineAdded { sale_id: 00000000-0000-0000-0000-0000000003e8, line_id: 00000000-0000-0000-0000-0000000003e9, product_id: 00000000-0000-0000-0000-00000000044c, name: "Item 0", unit_price: Money { minor: 100, currency: Bdt }, quantity: Quantity { milli: 250 }, tax_class: Standard { rate: Rate { basis_points: 1500 } } }, OrderDiscounted { sale_id: 00000000-0000-0000-0000-0000000003e8, discount: Amount { amount: Money { minor: 25, currency: Bdt } }, authorized_by: 00000000-0000-0000-0000-00000000011a }, TenderRecorded { sale_id: 00000000-0000-0000-0000-0000000003e8, tender_id: 00000000-0000-0000-0000-000000000708, method: Cash, amount: Money { minor: 0, currency: Bdt }, reference: None }, Completed { sale_id: 00000000-0000-0000-0000-0000000003e8, total: Money { minor: 0, currency: Bdt }, change_given: Money { minor: 0, currency: Bdt } }]
