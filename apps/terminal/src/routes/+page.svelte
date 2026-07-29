@@ -388,29 +388,44 @@
 							</div>
 
 							<div class="border-border bg-surface-sunken shrink-0 border-t p-3">
-								<div class="flex flex-col gap-1">
-									{#each sale.taxGroups as group (group.class + group.basisPoints)}
-										<div class="text-secondary text-text-secondary flex justify-between">
-											<span>
-												{group.class === 'exempt'
-													? 'Exempt supplies'
-													: group.class === 'zero_rated'
-														? 'Zero-rated supplies'
-														: `VAT ${format.percent(group.basisPoints)}`}
-											</span>
-											<!-- A taxed class shows what was charged; a nil-rated one shows the value of
-											     the supply, because its tax is always zero and printing that tells
-											     nobody anything. Same split as Mushak columns 6 and 9. -->
-											<Numeric
-												value={format.moneyPlain(
-													group.class === 'standard' ? group.taxMinor : group.taxableBaseMinor
-												)}
-												class="text-secondary"
-											/>
-										</div>
-									{/each}
+								<!-- One grid, not one per row. Separate grids size their `auto` columns
+								     independently, so the amounts land at four different x-positions — which
+								     defeats the tabular figures the whole numeric style exists for.
+								     Two headed columns because a single column mixing tax charged with the
+								     value of an exempt supply is a block a reader can add up and get nonsense
+								     from. Same split as Mushak columns 6 and 9. -->
+								<div
+									class="grid items-baseline gap-x-3 gap-y-1"
+									style="grid-template-columns: 1fr auto auto"
+								>
+									<span class="label-caps"></span>
+									<span class="label-caps text-end">Taxable</span>
+									<span class="label-caps text-end">VAT</span>
 
-									<div class="border-border mt-1 flex items-baseline justify-between border-t pt-2">
+									{#each sale.taxGroups as group (group.class + group.basisPoints)}
+										<span class="text-secondary text-text-secondary">
+											{group.class === 'exempt'
+												? 'Exempt'
+												: group.class === 'zero_rated'
+													? 'Zero-rated'
+													: `VAT ${format.percent(group.basisPoints)}`}
+										</span>
+										<Numeric
+											value={format.moneyPlain(group.taxableBaseMinor)}
+											class="text-secondary"
+										/>
+										{#if group.class === 'standard'}
+											<Numeric value={format.moneyPlain(group.taxMinor)} class="text-secondary" />
+										{:else}
+											<!-- A dash, not a zero. Nothing was charged, and a zero in a money column
+											     reads as an amount someone calculated. -->
+											<span class="numeric text-text-muted block text-end">—</span>
+										{/if}
+									{/each}
+								</div>
+
+								<div class="mt-1 flex flex-col gap-1">
+									<div class="border-border flex items-baseline justify-between border-t pt-2">
 										<span class="text-md font-semibold">Total</span>
 										<Numeric value={format.money(sale.totalMinor)} class="text-lg font-semibold" />
 									</div>
