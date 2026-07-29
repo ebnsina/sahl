@@ -21,10 +21,10 @@
 		createFormatters,
 		parseMinor
 	} from '@sahl/ui';
+	import PinPrompt from '$lib/PinPrompt.svelte';
 	import { asTillError, isTillAvailable, till, type CashReason, type ShiftView } from '$lib/till';
 
 	const CASHIER = '00000000-0000-0000-0000-0000000000ca';
-	const MANAGER = '00000000-0000-0000-0000-00000000011a';
 
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
@@ -50,6 +50,11 @@
 	let moveNote = $state('');
 	/** True while the cashier is counting, before the variance is revealed. */
 	let counting = $state(false);
+	/** Set while a cash movement is waiting on a manager's PIN. */
+	let pendingMove = $state<{ amountMinor: number; reason: CashReason; note: string | null } | null>(
+		null
+	);
+	let approvalError = $state<string | null>(null);
 
 	let counted = $derived(shift?.countedCashMinor !== null && shift?.countedCashMinor !== undefined);
 	let closed = $derived(shift?.isFinal === true);
@@ -140,30 +145,48 @@
 			};
 			return;
 		}
+		// Direction comes from the reason, not from the cashier typing a minus sign. A skim entered
+		// as positive would silently inflate the drawer it was meant to reduce.
 		const sign = REASONS.find((reason) => reason.value === moveReason)?.sign ?? -1;
-		void run(
-			() =>
-				till.moveCash({
-					// Direction comes from the reason, not from the cashier typing a minus sign. A skim
-					// entered as positive would silently inflate the drawer it was meant to reduce.
-					amountMinor: minor * sign,
-					reason: moveReason,
-					note: moveNote.trim() || null,
-					authorizedBy: MANAGER
-				}),
-			(result) => {
-				shift = result;
+		approvalError = null;
+		pendingMove = {
+			amountMinor: minor * sign,
+			reason: moveReason,
+			note: moveNote.trim() || null
+		};
+	}
+
+	function confirmMove(pin: string) {
+		const move = pendingMove;
+		if (!move) return;
+		void (async () => {
+			busy = true;
+			approvalError = null;
+			try {
+				shift = await till.moveCash({ ...move, pin });
+				pendingMove = null;
 				moveInput = '';
 				moveNote = '';
+			} catch (thrown) {
+				const failure = asTillError(thrown);
+				// A refused PIN keeps the prompt open — the manager mistyped and will try again.
+				if (failure.code === 'not_authorized' || failure.code === 'no_approver') {
+					approvalError = failure.message;
+				} else {
+					error = failure;
+					pendingMove = null;
+				}
+			} finally {
+				busy = false;
 			}
-		);
+		})();
 	}
 
 	function closeShift() {
 		const current = shift;
 		if (!current?.countedCashMinor) return;
 		void run(
-			() => till.closeShift(MANAGER, current.countedCashMinor ?? 0),
+			() => till.closeShift(CASHIER, current.countedCashMinor ?? 0),
 			(result) => (shift = result)
 		);
 	}
@@ -424,6 +447,19 @@
 				{/if}
 			</div>
 		</div>
+	{/if}
+
+	{#if pendingMove}
+		<PinPrompt
+			action="Move cash in or out of the drawer"
+			{busy}
+			error={approvalError}
+			onsubmit={confirmMove}
+			oncancel={() => {
+				pendingMove = null;
+				approvalError = null;
+			}}
+		/>
 	{/if}
 
 	{#if error}

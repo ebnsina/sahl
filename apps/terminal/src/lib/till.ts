@@ -120,6 +120,29 @@ export interface StockView {
 /** Why stock left a batch outside a sale. */
 export type IssueReason = 'wastage' | 'transfer_out' | 'return_to_supplier' | 'internal';
 
+/** One staff member. Never carries a PIN hash — verification happens in Rust. */
+export interface StaffView {
+	id: string;
+	name: string;
+	role: 'cashier' | 'manager' | 'owner';
+	active: boolean;
+}
+
+/** One line of the audit feed, with names already resolved. */
+export interface AuditView {
+	at: number;
+	severity: 'routine' | 'notable' | 'alert';
+	kind: string;
+	actor: string;
+	actorName: string;
+	approvedBy: string | null;
+	approvedByName: string | null;
+	amountMinor: number | null;
+	summary: string;
+	/** The actor approved their own action and their role did not carry it. */
+	unapproved: boolean;
+}
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -186,8 +209,9 @@ export const till = {
 	changeQuantity: (saleId: string, lineId: string, quantityMilli: number) =>
 		call<SaleView>('change_quantity', { saleId, lineId, quantityMilli }),
 
-	voidLine: (saleId: string, lineId: string, reason: string, authorizedBy: string) =>
-		call<SaleView>('void_line', { saleId, lineId, reason, authorizedBy }),
+	/** `pin` is a manager's own PIN, typed at the till — never an id this app picked. */
+	voidLine: (saleId: string, lineId: string, reason: string, pin: string) =>
+		call<SaleView>('void_line', { saleId, lineId, reason, pin }),
 
 	recordTender: (input: {
 		saleId: string;
@@ -215,7 +239,7 @@ export const till = {
 		amountMinor: number;
 		reason: CashReason;
 		note?: string | null;
-		authorizedBy: string;
+		pin: string;
 	}) => call<ShiftView>('move_cash', input),
 
 	countDrawer: (countedMinor: number, countedBy: string) =>
@@ -254,5 +278,19 @@ export const till = {
 	stockPosition: () => call<StockView>('stock_position'),
 
 	/** The same batches with recorded levels withheld — a blind shelf count. */
-	blindStockSheet: () => call<StockView>('blind_stock_sheet')
+	blindStockSheet: () => call<StockView>('blind_stock_sheet'),
+
+	staffList: () => call<StaffView[]>('staff_list'),
+
+	signIn: (staffId: string, pin: string) => call<StaffView>('sign_in', { staffId, pin }),
+
+	enrolStaff: (input: {
+		name: string;
+		role: StaffView['role'];
+		newPin: string;
+		/** An owner's PIN. Ignored only when enrolling the very first person. */
+		pin: string;
+	}) => call<StaffView[]>('enrol_staff', input),
+
+	auditFeed: () => call<AuditView[]>('audit_feed')
 };

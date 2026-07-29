@@ -377,3 +377,46 @@ impl StockView {
         self
     }
 }
+
+/// One staff member, as the sign-in and staff screens show them.
+///
+/// No PIN hash. The webview never needs it — verification happens in Rust — and a hash that reaches
+/// a browser is a hash that reaches a devtools panel.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaffView {
+    pub id: Uuid,
+    pub name: String,
+    pub role: &'static str,
+    pub active: bool,
+}
+
+impl StaffView {
+    #[must_use]
+    pub fn of(member: &sahl_core::staff::StaffMember) -> Self {
+        Self {
+            id: member.id,
+            name: member.name.clone(),
+            role: member.role.label(),
+            active: member.active,
+        }
+    }
+}
+
+/// One line of the audit feed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditView {
+    pub at: i64,
+    pub severity: &'static str,
+    pub kind: &'static str,
+    pub actor: Uuid,
+    /// Resolved for display; an unknown id renders honestly rather than as a blank.
+    pub actor_name: String,
+    pub approved_by: Option<Uuid>,
+    pub approved_by_name: Option<String>,
+    pub amount_minor: Option<i64>,
+    pub summary: String,
+    /// The actor approved their own action and their role did not carry it.
+    pub unapproved: bool,
+}

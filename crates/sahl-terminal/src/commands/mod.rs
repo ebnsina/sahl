@@ -12,19 +12,24 @@ mod view;
 
 use std::sync::Mutex;
 
+use argon2::password_hash::SaltString;
+use argon2::password_hash::rand_core::OsRng;
+
 use sahl_core::Timestamp;
 use sahl_core::inventory::{InventoryEvent, IssueReason};
 use sahl_core::money::{Currency, Money, Rate, Rounding};
 use sahl_core::quantity::Quantity;
 use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
 use sahl_core::shift::{CashMovementReason, ShiftEvent};
+use sahl_core::staff::{Permission, Role, StaffEvent, pin as staff_pin};
 use sahl_core::tax::{Discount, PricingMode, TaxClass};
 use uuid::Uuid;
 
 use crate::terminal::{Terminal, TerminalError};
 
 pub use view::{
-    BatchView, LineView, SaleView, ShiftView, StockView, TaxGroupView, TenderView, VarianceView,
+    AuditView, BatchView, LineView, SaleView, ShiftView, StaffView, StockView, TaxGroupView,
+    TenderView, VarianceView,
 };
 
 /// Managed Tauri state.
@@ -76,6 +81,9 @@ impl From<TerminalError> for CommandError {
             TerminalError::Sale(_) | TerminalError::Shift(_) | TerminalError::Inventory(_) => {
                 "rejected"
             }
+            TerminalError::Directory(_) => "rejected",
+            TerminalError::NotAuthorized => "not_authorized",
+            TerminalError::NoApprover => "no_approver",
             TerminalError::NoOpenShift => "no_open_shift",
             TerminalError::ShiftAlreadyOpen => "shift_already_open",
         };
@@ -102,6 +110,23 @@ fn now() -> Timestamp {
 /// UUID v7 — time-sortable, so a log sorted by id is also in creation order.
 fn new_id() -> Uuid {
     Uuid::now_v7()
+}
+
+/// Authenticate an approver and return their id.
+///
+/// The returned id is what lands in the event's `authorized_by`. A field the UI fills in from a
+/// constant records nothing, and every control built on it — the audit feed, the self-approval
+/// check — is decorative until this is the only way to produce one.
+fn authorize(
+    state: &TerminalState,
+    permission: Permission,
+    pin: &str,
+) -> Result<Uuid, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+    Ok(terminal.approve(permission, pin)?)
 }
 
 fn apply(state: &TerminalState, event: &SaleEvent) -> CommandResult {
@@ -190,7 +215,8 @@ pub fn void_line(
     sale_id: Uuid,
     line_id: Uuid,
     reason: String,
-    authorized_by: Uuid,
+    // A manager's own PIN, typed at the till. Never an id the UI chose.
+    pin: String,
 ) -> CommandResult {
     let reason = match reason.as_str() {
         "mistake" => VoidReason::Mistake,
@@ -207,6 +233,7 @@ pub fn void_line(
         }
     };
 
+    let authorized_by = authorize(&state, Permission::VoidLine, &pin)?;
     apply(
         &state,
         &SaleEvent::LineVoided {
@@ -225,7 +252,7 @@ pub fn discount_order(
     amount_minor: Option<i64>,
     basis_points: Option<i32>,
     currency: String,
-    authorized_by: Uuid,
+    pin: String,
 ) -> CommandResult {
     let currency = Currency::from_code(&currency).map_err(|error| CommandError {
         code: "bad_currency",
@@ -247,6 +274,7 @@ pub fn discount_order(
         }
     };
 
+    let authorized_by = authorize(&state, Permission::ApplyDiscount, &pin)?;
     apply(
         &state,
         &SaleEvent::OrderDiscounted {
@@ -493,9 +521,10 @@ pub fn move_cash(
     amount_minor: i64,
     reason: String,
     note: Option<String>,
-    authorized_by: Uuid,
+    pin: String,
 ) -> ShiftResult {
     let reason = cash_reason(&reason)?;
+    let authorized_by = authorize(&state, Permission::MoveCash, &pin)?;
     with_shift(&state, |terminal| {
         let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
         terminal
@@ -738,6 +767,166 @@ fn issue_reason(reason: &str) -> Result<IssueReason, CommandError> {
         other => Err(CommandError {
             code: "unknown_reason",
             message: format!("{other} is not a stock issue reason"),
+        }),
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Staff
+// -------------------------------------------------------------------------------------------
+
+/// Who can sign in at this till.
+#[tauri::command]
+pub fn staff_list(state: tauri::State<'_, TerminalState>) -> Result<Vec<StaffView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal
+        .staff()
+        .active()
+        .into_iter()
+        .map(StaffView::of)
+        .collect())
+}
+
+/// Sign one named person in, returning them if the PIN matches.
+#[tauri::command]
+pub fn sign_in(
+    state: tauri::State<'_, TerminalState>,
+    staff_id: Uuid,
+    pin: String,
+) -> Result<StaffView, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let id = terminal.sign_in(staff_id, &pin)?;
+    terminal
+        .staff()
+        .get(id)
+        .map(StaffView::of)
+        .ok_or(CommandError {
+            code: "not_authorized",
+            message: "that PIN was not accepted".to_owned(),
+        })
+}
+
+/// Enrol a staff member.
+///
+/// Salting happens here rather than in `sahl-core`, which stays free of randomness so the terminal
+/// and server compute identically from identical inputs.
+#[tauri::command]
+pub fn enrol_staff(
+    state: tauri::State<'_, TerminalState>,
+    name: String,
+    role: String,
+    new_pin: String,
+    pin: String,
+) -> Result<Vec<StaffView>, CommandError> {
+    let role = staff_role(&role)?;
+
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    // The first person enrolled cannot be approved by anyone — there is nobody yet. After that,
+    // managing staff is an owner's job and the PIN has to prove it.
+    let enrolled_by = if terminal.staff().is_empty() {
+        Uuid::nil()
+    } else {
+        terminal.approve(Permission::ManageStaff, &pin)?
+    };
+
+    let salt = SaltString::generate(&mut OsRng);
+    let pin_hash = staff_pin::hash(&new_pin, &salt).map_err(|error| CommandError {
+        code: "bad_pin",
+        message: error.to_string(),
+    })?;
+
+    terminal.record_staff(
+        &StaffEvent::Enrolled {
+            staff_id: new_id(),
+            name: name.trim().to_owned(),
+            role,
+            pin_hash,
+            at: now(),
+            enrolled_by,
+        },
+        new_id(),
+        now(),
+    )?;
+
+    Ok(terminal
+        .staff()
+        .active()
+        .into_iter()
+        .map(StaffView::of)
+        .collect())
+}
+
+/// The audit feed: actions that moved money without selling something.
+///
+/// Names are resolved here rather than in the webview, which has no staff list and should not need
+/// one. `unapproved` is the judged signal — self-approval by someone whose role did not carry it.
+#[tauri::command]
+pub fn audit_feed(state: tauri::State<'_, TerminalState>) -> Result<Vec<AuditView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let entries = sahl_core::staff::ranked(terminal.audit_entries()?);
+    let flagged: std::collections::BTreeSet<_> =
+        sahl_core::staff::unapproved(&entries, |actor| terminal.staff().role_of(actor))
+            .into_iter()
+            .map(|entry| (entry.at.millis(), entry.kind, entry.actor))
+            .collect();
+
+    let name_of = |id: Uuid| {
+        terminal
+            .staff()
+            .get(id)
+            .map_or_else(|| format!("Unknown ({id})"), |member| member.name.clone())
+    };
+
+    Ok(entries
+        .iter()
+        .map(|entry| AuditView {
+            at: entry.at.millis(),
+            severity: severity_label(entry.severity),
+            kind: entry.kind,
+            actor: entry.actor,
+            actor_name: name_of(entry.actor),
+            approved_by: entry.approved_by,
+            approved_by_name: entry.approved_by.map(name_of),
+            amount_minor: entry.amount.map(Money::minor),
+            summary: entry.summary.clone(),
+            unapproved: flagged.contains(&(entry.at.millis(), entry.kind, entry.actor)),
+        })
+        .collect())
+}
+
+const fn severity_label(severity: sahl_core::staff::Severity) -> &'static str {
+    match severity {
+        sahl_core::staff::Severity::Routine => "routine",
+        sahl_core::staff::Severity::Notable => "notable",
+        sahl_core::staff::Severity::Alert => "alert",
+    }
+}
+
+/// Map the UI's role string onto the domain enum.
+fn staff_role(role: &str) -> Result<Role, CommandError> {
+    match role {
+        "cashier" => Ok(Role::Cashier),
+        "manager" => Ok(Role::Manager),
+        "owner" => Ok(Role::Owner),
+        other => Err(CommandError {
+            code: "bad_role",
+            message: format!("{other} is not a role"),
         }),
     }
 }

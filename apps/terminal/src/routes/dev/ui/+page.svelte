@@ -13,6 +13,10 @@
 	 * because retrofitting it means auditing every margin in the product.
 	 */
 	import { Badge, Button, Card, Field, Input, Numeric, createFormatters } from '@sahl/ui';
+	import PinPrompt from '$lib/PinPrompt.svelte';
+
+	let showPin = $state(false);
+	let showPinError = $state(false);
 
 	type Density = 'compact' | 'touch';
 	type Theme = 'light' | 'dark';
@@ -229,6 +233,23 @@
 			</div>
 		</Card>
 
+		<Card label="Approval prompt">
+			<div class="flex flex-col gap-3">
+				<p class="text-secondary text-text-secondary">
+					Shown whenever an action needs someone other than the cashier. Here because it is the one
+					component that never appears in a browser during ordinary development — it only opens
+					inside the till — so this is the only place its density, theme and RTL behaviour get
+					looked at.
+				</p>
+				<div class="flex flex-wrap gap-2">
+					<Button variant="secondary" onclick={() => (showPin = true)}>Open the prompt</Button>
+					<Button variant="secondary" onclick={() => (showPinError = !showPinError)}>
+						{showPinError ? 'Clear' : 'Show'} refusal message
+					</Button>
+				</div>
+			</div>
+		</Card>
+
 		<Card label="Basket" flush>
 			<table class="w-full">
 				<caption class="sr-only">Example basket with tax-inclusive pricing</caption>
@@ -283,4 +304,13 @@
 			</div>
 		</Card>
 	</main>
+
+	{#if showPin}
+		<PinPrompt
+			action="Void a line from this sale"
+			error={showPinError ? 'That PIN was not accepted' : null}
+			onsubmit={() => (showPin = false)}
+			oncancel={() => (showPin = false)}
+		/>
+	{/if}
 </div>

@@ -5,10 +5,14 @@
 //! rules for is just noise.
 
 pub mod audit;
+pub mod directory;
+pub mod event;
 pub mod pin;
 pub mod role;
 
 pub use audit::{AuditEntry, Severity, from_sales, from_shifts, ranked, self_approved, unapproved};
+pub use directory::{Directory, DirectoryError, SignIn, StaffMember};
+pub use event::StaffEvent;
 pub use pin::PinError;
 pub use role::{
     ApprovalPolicy, Authorization, Permission, Role, authorize, authorize_discount,

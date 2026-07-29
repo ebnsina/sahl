@@ -18,6 +18,7 @@ use sahl_core::policy::lease::ClaimVerdict;
 use sahl_core::projection::SaleBook;
 use sahl_core::sale::{Sale, SaleError, SaleEvent};
 use sahl_core::shift::{Shift, ShiftError, ShiftEvent, ShiftReport, ShiftStatus};
+use sahl_core::staff::{Directory, DirectoryError, Permission, SignIn, StaffEvent};
 use sahl_core::{Money, Timestamp};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -43,6 +44,18 @@ pub enum TerminalError {
 
     #[error("{0}")]
     Inventory(#[from] InventoryError),
+
+    #[error("{0}")]
+    Directory(#[from] DirectoryError),
+
+    /// Nobody signed in, or the PIN did not match. Deliberately one variant: the UI shows the same
+    /// message either way, and splitting it invites a screen that leaks which half was wrong.
+    #[error("that PIN was not accepted")]
+    NotAuthorized,
+
+    /// The action needs approval and no active account holds it.
+    #[error("nobody at this outlet can approve that")]
+    NoApprover,
 
     #[error("no shift is open")]
     NoOpenShift,
@@ -79,6 +92,7 @@ pub struct Terminal {
     /// The shift running on this till, if any. One drawer, so at most one.
     shift: Option<Shift>,
     stock: InventoryBook,
+    staff: Directory,
     identity: DeviceIdentity,
 }
 
@@ -102,6 +116,7 @@ impl Terminal {
 
         let mut book = SaleBook::new();
         let mut stock = InventoryBook::new();
+        let mut staff = Directory::new();
         let mut shift_events: Vec<ShiftEvent> = Vec::new();
         for envelope in &stored {
             // Sale and shift events project separately; anything else belongs to a projection this
@@ -122,6 +137,11 @@ impl Terminal {
                         stock.apply(&event)?;
                     }
                 }
+                kind if kind.starts_with("staff.") => {
+                    if let Ok(event) = envelope.payload_as::<StaffEvent>() {
+                        staff.apply(&event)?;
+                    }
+                }
                 _ => {}
             }
         }
@@ -133,6 +153,7 @@ impl Terminal {
             book,
             shift: latest_open_shift(&shift_events)?,
             stock,
+            staff,
             identity,
         })
     }
@@ -257,6 +278,126 @@ impl Terminal {
         let envelope = self.seal(event, event_id, occurred_at)?;
         self.stock = candidate;
         Ok(envelope)
+    }
+
+    /// Validate, seal, persist, and project one staff event.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the event is invalid for the current state or cannot be persisted.
+    pub fn record_staff(
+        &mut self,
+        event: &StaffEvent,
+        event_id: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<EventEnvelope, TerminalError> {
+        let mut candidate = self.staff.clone();
+        candidate.apply(event)?;
+
+        let envelope = self.seal(event, event_id, occurred_at)?;
+        self.staff = candidate;
+        Ok(envelope)
+    }
+
+    /// The auditable actions in this till's log, with the person responsible for each.
+    ///
+    /// Actor has to be reconstructed rather than read off the event. Only some events name who
+    /// acted — a void records who *approved* it, not who rang it — so a sale's actor is the cashier
+    /// who opened it and a movement's is whoever took the till. That is the accurate attribution,
+    /// and inventing an `actor` field on every event to avoid this walk would record the same fact
+    /// twice and let the two disagree.
+    ///
+    /// # Errors
+    /// [`TerminalError::Store`] if the log cannot be read.
+    pub fn audit_entries(&self) -> Result<Vec<sahl_core::staff::AuditEntry>, TerminalError> {
+        use std::collections::BTreeMap;
+
+        let stored = self.store.load_all()?;
+        let mut sale_actors: BTreeMap<Uuid, Uuid> = BTreeMap::new();
+        let mut shift_actors: BTreeMap<Uuid, Uuid> = BTreeMap::new();
+        let mut sales = Vec::new();
+        let mut shifts = Vec::new();
+
+        for envelope in &stored {
+            match envelope.kind.as_str() {
+                kind if kind.starts_with("sale.") => {
+                    let Ok(event) = envelope.payload_as::<SaleEvent>() else {
+                        continue;
+                    };
+                    if let SaleEvent::Opened {
+                        sale_id, opened_by, ..
+                    } = &event
+                    {
+                        sale_actors.insert(*sale_id, *opened_by);
+                    }
+                    // A sale whose opening never reached this device still happened; attributing it
+                    // to nobody is more honest than attributing it to whoever is standing here.
+                    let actor = sale_actors
+                        .get(&event.sale_id())
+                        .copied()
+                        .unwrap_or_else(Uuid::nil);
+                    sales.push((event, envelope.occurred_at, actor));
+                }
+                kind if kind.starts_with("shift.") => {
+                    let Ok(event) = envelope.payload_as::<ShiftEvent>() else {
+                        continue;
+                    };
+                    if let ShiftEvent::Opened {
+                        shift_id,
+                        opened_by,
+                        ..
+                    } = &event
+                    {
+                        shift_actors.insert(*shift_id, *opened_by);
+                    }
+                    let actor = shift_actors
+                        .get(&event.shift_id())
+                        .copied()
+                        .unwrap_or_else(Uuid::nil);
+                    shifts.push((event, actor));
+                }
+                _ => {}
+            }
+        }
+
+        let mut entries = sahl_core::staff::from_sales(&sales);
+        entries.extend(sahl_core::staff::from_shifts(&shifts));
+        Ok(entries)
+    }
+
+    /// Who works here.
+    #[must_use]
+    pub const fn staff(&self) -> &Directory {
+        &self.staff
+    }
+
+    /// Authenticate someone senior enough to approve `permission`, returning their id.
+    ///
+    /// The id this returns is what goes into the event's `authorized_by`. That is the whole point:
+    /// an approval field filled in by the UI from a constant records nothing, and every control
+    /// built on top of it — the audit feed, the self-approval check — is then decorative.
+    ///
+    /// # Errors
+    /// [`TerminalError::NotAuthorized`] on a wrong PIN, [`TerminalError::NoApprover`] when no
+    /// active account holds the permission at all.
+    pub fn approve(&self, permission: Permission, pin: &str) -> Result<Uuid, TerminalError> {
+        match self.staff.approve(permission, pin)? {
+            SignIn::Ok { staff_id, .. } => Ok(staff_id),
+            SignIn::Unknown => Err(TerminalError::NoApprover),
+            SignIn::WrongPin | SignIn::Inactive => Err(TerminalError::NotAuthorized),
+        }
+    }
+
+    /// Authenticate one named person — the sign-in at the start of a shift.
+    ///
+    /// # Errors
+    /// [`TerminalError::NotAuthorized`] if the PIN does not match or the account is inactive.
+    pub fn sign_in(&self, staff_id: Uuid, pin: &str) -> Result<Uuid, TerminalError> {
+        match self.staff.sign_in(staff_id, pin)? {
+            SignIn::Ok { staff_id, .. } => Ok(staff_id),
+            SignIn::Unknown | SignIn::WrongPin | SignIn::Inactive => {
+                Err(TerminalError::NotAuthorized)
+            }
+        }
     }
 
     /// Every batch this outlet knows about.
@@ -962,5 +1103,172 @@ mod tests {
 
         assert_eq!(reloaded.book().len(), 1);
         assert_eq!(reloaded.stock().levels().len(), 1);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Staff and approval
+    // ------------------------------------------------------------------------------------------
+
+    fn salt(seed: &str) -> argon2::password_hash::SaltString {
+        let padded = format!("{seed}-sahl-test");
+        argon2::password_hash::SaltString::encode_b64(padded.as_bytes()).expect("valid salt")
+    }
+
+    fn enrolled(who: u128, name: &str, role: sahl_core::staff::Role, secret: &str) -> StaffEvent {
+        StaffEvent::Enrolled {
+            staff_id: id(who),
+            name: name.to_owned(),
+            role,
+            pin_hash: sahl_core::staff::pin::hash(secret, &salt(name)).expect("hashes"),
+            at: at(0),
+            enrolled_by: Uuid::nil(),
+        }
+    }
+
+    fn staffed() -> Terminal {
+        let mut till = fresh();
+        till.record_staff(
+            &enrolled(CASHIER, "Ruma", sahl_core::staff::Role::Cashier, "8317"),
+            id(60),
+            at(0),
+        )
+        .expect("enrols");
+        till.record_staff(
+            &enrolled(MANAGER, "Habib", sahl_core::staff::Role::Manager, "5294"),
+            id(61),
+            at(1),
+        )
+        .expect("enrols");
+        till
+    }
+
+    #[test]
+    fn a_manager_pin_yields_the_id_that_goes_into_authorized_by() {
+        // The whole point of the wiring: the approver is proved, not asserted by the caller.
+        let till = staffed();
+        assert_eq!(
+            till.approve(Permission::VoidLine, "5294")
+                .expect("approves"),
+            id(MANAGER)
+        );
+    }
+
+    #[test]
+    fn a_cashier_pin_does_not_authorise_a_void() {
+        let till = staffed();
+        assert!(matches!(
+            till.approve(Permission::VoidLine, "8317"),
+            Err(TerminalError::NotAuthorized)
+        ));
+    }
+
+    #[test]
+    fn an_outlet_with_no_manager_says_so_rather_than_blaming_the_pin() {
+        // "Nobody can approve that" and "you typed it wrong" need different responses at a counter.
+        let mut till = fresh();
+        till.record_staff(
+            &enrolled(CASHIER, "Ruma", sahl_core::staff::Role::Cashier, "8317"),
+            id(60),
+            at(0),
+        )
+        .expect("enrols");
+
+        assert!(matches!(
+            till.approve(Permission::VoidLine, "8317"),
+            Err(TerminalError::NoApprover)
+        ));
+    }
+
+    #[test]
+    fn staff_survive_a_restart() {
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_staff(
+            &enrolled(MANAGER, "Habib", sahl_core::staff::Role::Manager, "5294"),
+            id(60),
+            at(0),
+        )
+        .expect("enrols");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(
+            reloaded
+                .approve(Permission::VoidLine, "5294")
+                .expect("approves"),
+            id(MANAGER)
+        );
+    }
+
+    #[test]
+    fn a_departed_manager_stops_being_able_to_approve() {
+        // Someone who left on Friday must not still authorise voids on Monday.
+        let mut till = staffed();
+        till.record_staff(
+            &StaffEvent::Deactivated {
+                staff_id: id(MANAGER),
+                at: at(10),
+                deactivated_by: id(MANAGER),
+            },
+            id(62),
+            at(10),
+        )
+        .expect("deactivates");
+
+        assert!(matches!(
+            till.approve(Permission::VoidLine, "5294"),
+            Err(TerminalError::NoApprover)
+        ));
+    }
+
+    #[test]
+    fn the_audit_feed_attributes_a_void_to_the_cashier_and_the_approver_separately() {
+        // The event records who approved; the actor has to be reconstructed from who opened the
+        // sale. Conflating them would make every void look self-approved.
+        let mut till = staffed();
+        till.record(&opened(), id(80), at(1)).expect("opens sale");
+        till.record(&line(48_000), id(81), at(2)).expect("adds");
+        till.record(
+            &SaleEvent::LineVoided {
+                sale_id: id(SALE),
+                line_id: id(11),
+                reason: sahl_core::sale::VoidReason::Mistake,
+                authorized_by: id(MANAGER),
+            },
+            id(82),
+            at(3),
+        )
+        .expect("voids");
+
+        let entries = till.audit_entries().expect("reads");
+        assert_eq!(entries.len(), 1, "only the void is auditable");
+        assert_eq!(entries[0].actor, id(CASHIER), "who rang it");
+        assert_eq!(entries[0].approved_by, Some(id(MANAGER)), "who allowed it");
+        assert!(!entries[0].is_self_approved());
+    }
+
+    #[test]
+    fn a_cashier_approving_their_own_void_shows_up_as_unapproved() {
+        let mut till = staffed();
+        till.record(&opened(), id(80), at(1)).expect("opens sale");
+        till.record(&line(48_000), id(81), at(2)).expect("adds");
+        till.record(
+            &SaleEvent::LineVoided {
+                sale_id: id(SALE),
+                line_id: id(11),
+                reason: sahl_core::sale::VoidReason::Mistake,
+                authorized_by: id(CASHIER),
+            },
+            id(82),
+            at(3),
+        )
+        .expect("voids");
+
+        let entries = till.audit_entries().expect("reads");
+        let flagged = sahl_core::staff::unapproved(&entries, |actor| till.staff().role_of(actor));
+
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged[0].actor, id(CASHIER));
     }
 }

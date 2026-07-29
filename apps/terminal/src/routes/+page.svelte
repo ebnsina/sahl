@@ -19,6 +19,7 @@
 		createFormatters,
 		parseMinor
 	} from '@sahl/ui';
+	import PinPrompt from '$lib/PinPrompt.svelte';
 	import {
 		asTillError,
 		isTillAvailable,
@@ -44,7 +45,6 @@
 	];
 
 	const CASHIER = '00000000-0000-0000-0000-0000000000ca';
-	const MANAGER = '00000000-0000-0000-0000-00000000011a';
 
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
@@ -55,6 +55,9 @@
 	let busy = $state(false);
 	let cashInput = $state('');
 	let available = $state(true);
+	/** Set while a void is waiting on a manager's PIN. */
+	let pendingVoid = $state<string | null>(null);
+	let approvalError = $state<string | null>(null);
 
 	// Read straight off the till's own numbers — never recomputed here.
 	let settled = $derived(sale?.status === 'completed');
@@ -115,12 +118,35 @@
 	}
 
 	function voidLine(lineId: string) {
+		// The approval is not this screen's to grant. It asks, the till decides.
+		approvalError = null;
+		pendingVoid = lineId;
+	}
+
+	function confirmVoid(pin: string) {
 		const current = sale;
-		if (!current) return;
-		void run(
-			() => till.voidLine(current.id, lineId, 'mistake', MANAGER),
-			(result) => (sale = result)
-		);
+		const lineId = pendingVoid;
+		if (!current || !lineId) return;
+		void (async () => {
+			busy = true;
+			approvalError = null;
+			try {
+				sale = await till.voidLine(current.id, lineId, 'mistake', pin);
+				pendingVoid = null;
+			} catch (thrown) {
+				const failure = asTillError(thrown);
+				// A refused PIN keeps the prompt open — the manager mistyped and will try again.
+				// Anything else is a real fault and belongs in the page-level error strip.
+				if (failure.code === 'not_authorized' || failure.code === 'no_approver') {
+					approvalError = failure.message;
+				} else {
+					error = failure;
+					pendingVoid = null;
+				}
+			} finally {
+				busy = false;
+			}
+		})();
 	}
 
 	function tenderCash() {
@@ -408,6 +434,19 @@
 							</Button>
 						</div>
 					</Card>
+				{/if}
+
+				{#if pendingVoid}
+					<PinPrompt
+						action="Void a line from this sale"
+						{busy}
+						error={approvalError}
+						onsubmit={confirmVoid}
+						oncancel={() => {
+							pendingVoid = null;
+							approvalError = null;
+						}}
+					/>
 				{/if}
 
 				{#if error}
