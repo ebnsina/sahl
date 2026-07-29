@@ -62,6 +62,12 @@ pub enum TerminalError {
     #[error("{0}")]
     Outlet(#[from] OutletError),
 
+    #[error("{0}")]
+    FiscalDocument(#[from] sahl_fiscal::FiscalError),
+
+    #[error("sale {sale_id} has not been invoiced")]
+    NotInvoiced { sale_id: Uuid },
+
     #[error("no purchase order {order_id}")]
     UnknownOrder { order_id: Uuid },
 
@@ -498,6 +504,87 @@ impl Terminal {
         self.outlet
             .as_ref()
             .map_or("none", |outlet| outlet.regime.label())
+    }
+
+    /// Rebuild the fiscal document for a completed sale.
+    ///
+    /// Derived rather than stored. The challan is a *rendering* of facts that already exist — the
+    /// sale's lines, the seal's number and time, the outlet's registration — and storing a second
+    /// copy would create something that can disagree with all three. It also means a challan can
+    /// be reprinted in another language later without the original having pinned the wording.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the sale is unknown or never issued an invoice, or if the outlet's
+    /// configuration cannot produce a valid document.
+    pub fn fiscal_document(&self, sale_id: Uuid) -> Result<sahl_fiscal::Document, TerminalError> {
+        use sahl_fiscal::{Buyer, FiscalLine, Fiscalization, Invoice, Seller};
+
+        let sale = self.sale(sale_id)?;
+        let seal = self
+            .invoice_seal(sale_id)?
+            .ok_or(TerminalError::NotInvoiced { sale_id })?;
+
+        let Some(outlet) = self.outlet.as_ref() else {
+            // An unconfigured outlet trades under no regime, which is a real deployment: the
+            // customer gets a receipt and the state is owed nothing extra.
+            return Ok(sahl_fiscal::Document::None);
+        };
+
+        let invoice = Invoice {
+            sale_id,
+            sequence: seal.counter,
+            issued_at: seal.issued_at,
+            seller: Seller {
+                name: outlet.name.clone(),
+                registration: outlet.tax_registration.clone().unwrap_or_default(),
+                address: outlet.address.clone(),
+            },
+            // Not captured at the counter yet. Above Rule 40(1)'s threshold the document layer
+            // refuses rather than issuing blank, which is the correct failure until it is.
+            buyer: Buyer::default(),
+            lines: sale
+                .active_lines()
+                .map(|line| FiscalLine {
+                    description: line.name.clone(),
+                    // No unit on a catalogue line yet, so every supply is counted in pieces. Wrong
+                    // for anything weighed, and a real column on the form — it moves when the
+                    // catalogue does.
+                    unit: "pcs".to_owned(),
+                    quantity_milli: line.quantity.milli(),
+                })
+                .collect(),
+            totals: sale.totals()?,
+            destination: None,
+        };
+
+        Ok(match outlet.regime {
+            sahl_core::outlet::FiscalRegime::BdMushak => {
+                sahl_fiscal::bd_mushak::BdMushak.issue(&invoice)?
+            }
+            _ => sahl_fiscal::noop::NoFiscalRegime.issue(&invoice)?,
+        })
+    }
+
+    /// The seal a sale was invoiced under, if it has been completed.
+    ///
+    /// # Errors
+    /// [`TerminalError::Store`] if the log cannot be read.
+    pub fn invoice_seal(
+        &self,
+        sale_id: Uuid,
+    ) -> Result<Option<sahl_core::ledger::InvoiceSeal>, TerminalError> {
+        for envelope in self.store.load_all()? {
+            if envelope.kind != "fiscal.invoice_issued" {
+                continue;
+            }
+            if let Ok(FiscalEvent::InvoiceIssued { seal, .. }) =
+                envelope.payload_as::<FiscalEvent>()
+                && seal.sale_id == sale_id
+            {
+                return Ok(Some(seal));
+            }
+        }
+        Ok(None)
     }
 
     /// Where this device's fiscal sequence has got to.
@@ -2288,5 +2375,105 @@ mod tests {
 
         let sahl_core::ledger::FiscalEvent::InvoiceIssued { content, .. } = issued;
         assert_eq!(content.regime, "bd_mushak", "not the hardcoded none");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Producing a challan
+    // ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn an_unconfigured_outlet_owes_no_document() {
+        let mut till = fresh();
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        assert_eq!(
+            till.fiscal_document(id(0x100)).expect("builds"),
+            sahl_fiscal::Document::None
+        );
+    }
+
+    #[test]
+    fn a_mushak_outlet_produces_a_challan_with_the_invoice_number() {
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        ring_up(&mut till, 0x100, 11_500);
+        let seal = settle(&mut till, 0x100, 11_500);
+
+        let document = till.fiscal_document(id(0x100)).expect("builds");
+        let sahl_fiscal::Document::BdMushak63(challan) = document else {
+            panic!("expected a Mushak");
+        };
+
+        assert_eq!(challan.invoice_number, seal.counter.to_string());
+        assert_eq!(challan.seller_bin, "0031234567890");
+        assert_eq!(challan.issuing_address, "12 Dhanmondi 27, Dhaka");
+        assert_eq!(challan.lines.len(), 1);
+        // The shelf price is tax-inclusive; column 6 must be the net.
+        assert_eq!(challan.lines[0].total_value, Money::from_minor(10_000, BDT));
+        assert_eq!(challan.lines[0].vat_amount, Money::from_minor(1_500, BDT));
+        assert_eq!(challan.total_with_tax, Money::from_minor(11_500, BDT));
+    }
+
+    #[test]
+    fn a_sale_that_was_never_completed_has_no_document() {
+        // The invoice number comes from completion. Asking before then is a question with no
+        // answer, not a document with a blank number.
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        ring_up(&mut till, 0x100, 11_500);
+
+        assert!(matches!(
+            till.fiscal_document(id(0x100)),
+            Err(TerminalError::NotInvoiced { .. })
+        ));
+    }
+
+    #[test]
+    fn a_large_sale_is_refused_a_challan_until_the_buyer_is_named() {
+        // Rule 40(1): above Tk 25,000 the buyer must be named with address and BIN. Nothing at the
+        // counter captures that yet, so the document layer refuses — which is the correct failure.
+        // The sale itself still completed, because a till that refuses to sell is worse.
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        ring_up(&mut till, 0x100, 3_000_000);
+        settle(&mut till, 0x100, 3_000_000);
+
+        assert!(
+            till.sale(id(0x100)).expect("sale").settled_at().is_some(),
+            "the sale went through"
+        );
+        assert!(
+            matches!(
+                till.fiscal_document(id(0x100)),
+                Err(TerminalError::FiscalDocument(_))
+            ),
+            "but the challan cannot be issued blank"
+        );
+    }
+
+    #[test]
+    fn the_challan_survives_a_restart() {
+        // It is rebuilt from the log rather than stored, so this is really asking whether the seal
+        // and the outlet config both came back.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        let sahl_fiscal::Document::BdMushak63(challan) =
+            reloaded.fiscal_document(id(0x100)).expect("builds")
+        else {
+            panic!("expected a Mushak");
+        };
+        assert_eq!(challan.invoice_number, "1");
     }
 }

@@ -17,6 +17,7 @@ tauri-build = { workspace = true }
 
 [dependencies]
 sahl-core = { workspace = true }
+sahl-fiscal = { workspace = true }
 argon2 = { workspace = true }
 sahl-sync = { workspace = true }
 

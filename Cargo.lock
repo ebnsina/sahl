@@ -3311,6 +3311,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rusqlite",
  "sahl-core",
+ "sahl-fiscal",
  "sahl-server",
  "sahl-sync",
  "serde",

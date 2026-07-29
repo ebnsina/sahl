@@ -236,6 +236,25 @@
 			</div>
 		</Card>
 
+		<Card label="Status bands">
+			<div class="flex flex-col gap-2">
+				<p class="text-secondary text-text-secondary">
+					Here because they were broken everywhere and it was invisible: every error strip in the
+					app referenced <code class="numeric">bg-danger-surface</code> and
+					<code class="numeric">border-danger-border</code>, neither of which is a token. Tailwind
+					generates nothing for a name that does not exist, so the bands rendered as bare coloured
+					text on the page background and looked plausible. A token typo has no compiler.
+				</p>
+				<div class="border-danger bg-danger-subtle text-danger-text border p-3">
+					Something went wrong and the till refused it.
+				</div>
+				<div class="border-warn bg-warn-subtle text-warn-text border p-3">
+					The sale went through, but a document could not be issued.
+				</div>
+				<div class="border-success bg-success-subtle text-success-text border p-3">Saved.</div>
+			</div>
+		</Card>
+
 		<Card label="Mark">
 			<div class="flex flex-col gap-4">
 				<p class="text-secondary text-text-secondary">

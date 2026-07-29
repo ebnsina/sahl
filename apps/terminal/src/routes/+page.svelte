@@ -31,6 +31,7 @@
 		isTillAvailable,
 		till,
 		type SaleView,
+		type DocumentView,
 		type SyncView,
 		type TaxTreatment,
 		type TillStatus
@@ -96,6 +97,10 @@
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
 	let sale = $state<SaleView | null>(null);
+	/** The challan for the sale just completed, if this outlet issues one. */
+	let document = $state<DocumentView | null>(null);
+	/** Why a challan could not be issued. Surfaced, never allowed to block the sale. */
+	let documentProblem = $state<string | null>(null);
 	let status = $state<TillStatus | null>(null);
 	let sync = $state<SyncView | null>(null);
 	let error = $state<{ code: string; message: string } | null>(null);
@@ -137,6 +142,8 @@
 	});
 
 	function startSale() {
+		document = null;
+		documentProblem = null;
 		void run(
 			() => till.openSale(CASHIER),
 			(result) => {
@@ -234,8 +241,24 @@
 		if (!current) return;
 		void run(
 			() => till.completeSale(current.id, CASHIER),
-			(result) => (sale = result)
+			(result) => {
+				sale = result;
+				// Fetched after the sale is already settled, and its failure never undoes it. A till
+				// that refused to sell because a document could not be issued would be a till a
+				// shopkeeper stops using.
+				void fetchDocument(result.id);
+			}
 		);
+	}
+
+	async function fetchDocument(saleId: string) {
+		document = null;
+		documentProblem = null;
+		try {
+			document = await till.fiscalDocument(saleId);
+		} catch (thrown) {
+			documentProblem = asTillError(thrown).message;
+		}
 	}
 
 	function abandon() {
@@ -542,6 +565,27 @@
 									· change <Numeric value={format.money(sale?.changeDueMinor ?? 0)} align="start" />
 								{/if}
 							</p>
+
+							{#if document?.regime === 'bd_mushak63'}
+								<div class="border-border bg-surface-sunken border p-3">
+									<p class="label-caps">Mushak 6.3</p>
+									<div class="mt-1 flex items-baseline justify-between gap-3">
+										<span class="text-secondary text-text-secondary">Challan no.</span>
+										<Numeric value={document.invoiceNumber} class="font-semibold" />
+									</div>
+									<p class="text-secondary text-text-muted mt-1">
+										{document.sellerName} · BIN {document.sellerBin}
+									</p>
+								</div>
+							{:else if documentProblem}
+								<!-- The sale already went through. This says the challan could not be issued,
+								     which is a thing to fix, not a thing to have refused the sale over. -->
+								<div class="border-warn bg-warn-subtle text-warn-text border p-3">
+									<p class="label-caps">No challan issued</p>
+									<p class="text-secondary mt-1">{documentProblem}</p>
+								</div>
+							{/if}
+
 							<Button variant="primary" size="lg" onclick={startSale} disabled={busy}>
 								Next sale
 							</Button>

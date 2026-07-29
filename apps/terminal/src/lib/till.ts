@@ -192,6 +192,40 @@ export interface OutletView {
 	capabilities: string[];
 }
 
+/** One row of a Mushak 6.3, by the form's own column numbers. */
+export interface ChallanLineView {
+	serial: number;
+	description: string;
+	unit: string;
+	quantityMilli: number;
+	/** Column 5 — unit value, excluding tax. */
+	unitValueMinor: number;
+	/** Column 6 — total value, excluding tax. */
+	totalValueMinor: number;
+	supplementaryDutyMinor: number;
+	vatRateBasisPoints: number;
+	vatAmountMinor: number;
+	totalWithTaxMinor: number;
+}
+
+/** A fiscal document, or the fact that this outlet owes none. */
+export type DocumentView =
+	| {
+			regime: 'bd_mushak63';
+			sellerName: string;
+			sellerBin: string;
+			issuingAddress: string;
+			buyerName: string | null;
+			buyerBin: string | null;
+			invoiceNumber: string;
+			issuedAtMillis: number;
+			lines: ChallanLineView[];
+			totalValueMinor: number;
+			totalVatMinor: number;
+			totalWithTaxMinor: number;
+	  }
+	| { regime: 'none' };
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -351,6 +385,9 @@ export const till = {
 	auditFeed: () => call<AuditView[]>('audit_feed'),
 
 	outletConfig: () => call<OutletView | null>('outlet_config'),
+
+	/** Rebuilt from the log on demand — never stored, so it cannot disagree with the sale. */
+	fiscalDocument: (saleId: string) => call<DocumentView>('fiscal_document', { saleId }),
 
 	configureOutlet: (input: {
 		name: string;

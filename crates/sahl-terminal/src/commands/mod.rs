@@ -83,7 +83,9 @@ impl From<TerminalError> for CommandError {
             TerminalError::Sale(_)
             | TerminalError::Shift(_)
             | TerminalError::Inventory(_)
-            | TerminalError::Outlet(_) => "rejected",
+            | TerminalError::Outlet(_)
+            | TerminalError::FiscalDocument(_) => "rejected",
+            TerminalError::NotInvoiced { .. } => "not_invoiced",
             TerminalError::Directory(_) | TerminalError::Purchase(_) | TerminalError::Fiscal(_) => {
                 "rejected"
             }
@@ -1392,4 +1394,93 @@ const fn capability_label(capability: sahl_core::outlet::Capability) -> &'static
         // Capability is #[non_exhaustive]; an unnamed one renders honestly rather than as a guess.
         _ => "unknown",
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// Fiscal documents
+// -------------------------------------------------------------------------------------------
+
+/// One row of a Mushak 6.3, by the form's own column numbers.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChallanLineView {
+    pub serial: u32,
+    pub description: String,
+    pub unit: String,
+    pub quantity_milli: i64,
+    /// Column 5 — unit value, excluding tax.
+    pub unit_value_minor: i64,
+    /// Column 6 — total value, excluding tax.
+    pub total_value_minor: i64,
+    pub supplementary_duty_minor: i64,
+    pub vat_rate_basis_points: i32,
+    pub vat_amount_minor: i64,
+    pub total_with_tax_minor: i64,
+}
+
+/// A fiscal document, or the fact that this outlet owes none.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "regime", rename_all = "snake_case")]
+pub enum DocumentView {
+    BdMushak63 {
+        seller_name: String,
+        seller_bin: String,
+        issuing_address: String,
+        buyer_name: Option<String>,
+        buyer_bin: Option<String>,
+        invoice_number: String,
+        issued_at_millis: i64,
+        lines: Vec<ChallanLineView>,
+        total_value_minor: i64,
+        total_vat_minor: i64,
+        total_with_tax_minor: i64,
+    },
+    /// No regime configured. An ordinary receipt is the whole obligation.
+    None,
+}
+
+/// The fiscal document for a completed sale.
+///
+/// Rebuilt on demand rather than stored — see `Terminal::fiscal_document`.
+#[tauri::command]
+pub fn fiscal_document(
+    state: tauri::State<'_, TerminalState>,
+    sale_id: Uuid,
+) -> Result<DocumentView, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(match terminal.fiscal_document(sale_id)? {
+        sahl_fiscal::Document::BdMushak63(challan) => DocumentView::BdMushak63 {
+            seller_name: challan.seller_name.clone(),
+            seller_bin: challan.seller_bin.clone(),
+            issuing_address: challan.issuing_address.clone(),
+            buyer_name: challan.buyer_name.clone(),
+            buyer_bin: challan.buyer_bin.clone(),
+            invoice_number: challan.invoice_number.clone(),
+            issued_at_millis: challan.issued_at_millis,
+            lines: challan
+                .lines
+                .iter()
+                .map(|line| ChallanLineView {
+                    serial: line.serial,
+                    description: line.description.clone(),
+                    unit: line.unit.clone(),
+                    quantity_milli: line.quantity_milli,
+                    unit_value_minor: line.unit_value.minor(),
+                    total_value_minor: line.total_value.minor(),
+                    supplementary_duty_minor: line.supplementary_duty.minor(),
+                    vat_rate_basis_points: line.vat_rate_basis_points,
+                    vat_amount_minor: line.vat_amount.minor(),
+                    total_with_tax_minor: line.total_with_tax.minor(),
+                })
+                .collect(),
+            total_value_minor: challan.total_value.minor(),
+            total_vat_minor: challan.total_vat.minor(),
+            total_with_tax_minor: challan.total_with_tax.minor(),
+        },
+        _ => DocumentView::None,
+    })
 }

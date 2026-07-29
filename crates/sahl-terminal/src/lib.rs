@@ -130,6 +130,7 @@ pub fn run() {
             commands::order_list,
             commands::outlet_config,
             commands::configure_outlet,
+            commands::fiscal_document,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");

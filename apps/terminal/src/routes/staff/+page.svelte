@@ -297,7 +297,7 @@
 	{/if}
 
 	{#if error}
-		<div class="border-danger-border bg-danger-surface text-danger-text border-t px-4 py-3">
+		<div class="border-danger bg-danger-subtle text-danger-text border-t px-4 py-3">
 			<p class="text-body">{error.message}</p>
 		</div>
 	{/if}
