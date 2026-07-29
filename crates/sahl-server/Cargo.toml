@@ -34,6 +34,7 @@ tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [lints]
 workspace = true

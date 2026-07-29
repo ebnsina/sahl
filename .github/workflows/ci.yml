@@ -70,7 +70,9 @@ jobs:
           PGPASSWORD: postgres
           PGDATABASE: sahl_ci
         run: |
-          psql -v ON_ERROR_STOP=1 -f crates/sahl-server/migrations/0001_foundations.sql
+          for file in crates/sahl-server/migrations/*.sql; do
+            psql -v ON_ERROR_STOP=1 -f "$file"
+          done
           psql -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE sahl_app LOGIN PASSWORD 'ci' NOSUPERUSER NOBYPASSRLS;
           GRANT USAGE ON SCHEMA public TO sahl_app;
@@ -120,7 +122,11 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Apply migrations
-        run: psql -v ON_ERROR_STOP=1 -f crates/sahl-server/migrations/0001_foundations.sql
+        # Whole directory, in order — naming one file means a new migration is silently skipped.
+        run: |
+          for file in crates/sahl-server/migrations/*.sql; do
+            psql -v ON_ERROR_STOP=1 -f "$file"
+          done
 
       - name: Create the runtime role
         # Mirrors production exactly: NOSUPERUSER NOBYPASSRLS, and no UPDATE or DELETE on the event

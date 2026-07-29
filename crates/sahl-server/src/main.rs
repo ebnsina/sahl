@@ -8,10 +8,9 @@
 
 use std::process::ExitCode;
 
-use axum::Router;
-use axum::routing::get;
 use sahl_server::config::Config;
 use sahl_server::db;
+use sahl_server::routes::{AppState, router};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -69,9 +68,11 @@ async fn run() -> Result<(), String> {
         );
     }
 
-    let app = Router::new()
-        .route("/health", get(|| async { "ok" }))
-        .with_state(pool);
+    let skew = i64::try_from(config.signature_max_skew.as_secs()).unwrap_or(300);
+    let app = router(AppState {
+        pool,
+        max_skew_seconds: skew,
+    });
 
     let listener = tokio::net::TcpListener::bind(config.bind_address)
         .await
