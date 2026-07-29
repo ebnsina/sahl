@@ -14,7 +14,10 @@ sahl-core = { path = "crates/sahl-core" }
 sahl-fiscal = { path = "crates/sahl-fiscal" }
 
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+# NOTE: `preserve_order` is deliberately NOT enabled. Without it, `serde_json::Value` objects are
+# backed by a BTreeMap, so keys serialize in sorted order — which is exactly what canonical hashing
+# of the event log requires. Turning it on would make event hashes depend on field insertion order.
+serde_json = "1"
 thiserror = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }

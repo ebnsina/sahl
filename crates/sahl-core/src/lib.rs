@@ -28,13 +28,20 @@
     )
 )]
 
+pub mod event;
 pub mod money;
 pub mod quantity;
 pub mod tax;
+pub mod time;
 
+pub use event::{
+    ChainTip, EventChain, EventEnvelope, EventError, EventHash, EventHeader, EventPayload,
+    verify_chain, verify_chain_from_genesis,
+};
 pub use money::{Currency, Money, MoneyError, Rate, Rounding};
 pub use quantity::Quantity;
 pub use tax::{
     Discount, LineInput, LineTotals, OrderInput, OrderTotals, PricingMode, TaxClass, TaxError,
     TaxGroup, calculate,
 };
+pub use time::Timestamp;
