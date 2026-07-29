@@ -488,28 +488,48 @@
 									/>
 								{/snippet}
 							</Field>
-							<div class="flex flex-wrap gap-2">
-								<Button variant="secondary" icon={Banknote} onclick={tenderCash} disabled={busy}>
-									Take cash
-								</Button>
-								<Button
-									variant="secondary"
-									icon={Banknote}
-									onclick={tenderExact}
-									disabled={busy || balanceDue <= 0}
-								>
-									Exact
-								</Button>
+							<!-- Laid out by weight rather than left to wrap. The two tender buttons are the
+							     same kind of action, so they share a row at equal width; completing the sale is
+							     the one thing this panel exists for, so it gets its own full-width row; and
+							     abandoning is the only destructive action here, so it sits apart from the
+							     button a cashier reaches for a hundred times a day. -->
+							<div class="flex flex-col gap-2">
+								<div class="grid grid-cols-2 gap-2">
+									<Button
+										variant="secondary"
+										icon={Banknote}
+										block
+										onclick={tenderCash}
+										disabled={busy}
+									>
+										Take cash
+									</Button>
+									<Button
+										variant="secondary"
+										icon={Banknote}
+										block
+										onclick={tenderExact}
+										disabled={busy || balanceDue <= 0}
+									>
+										Exact
+									</Button>
+								</div>
+
 								<Button
 									variant="primary"
 									icon={Check}
+									block
 									onclick={complete}
 									disabled={busy || balanceDue > 0 || sale.lines.length === 0}
 								>
 									Complete sale
 								</Button>
-								<Button variant="ghost" icon={Ban} onclick={abandon} disabled={busy}>Abandon</Button
-								>
+
+								<div class="border-border mt-1 border-t pt-2">
+									<Button variant="ghost" icon={Ban} block onclick={abandon} disabled={busy}>
+										Abandon sale
+									</Button>
+								</div>
 							</div>
 						</div>
 					</Card>
