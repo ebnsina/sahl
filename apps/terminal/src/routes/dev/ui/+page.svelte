@@ -12,12 +12,23 @@
 	 * colour. **Direction** proves the Arabic build works — RTL is designed in from the start here,
 	 * because retrofitting it means auditing every margin in the product.
 	 */
-	import { Badge, Button, Card, Field, Input, Logo, Numeric, createFormatters } from '@sahl/ui';
+	import {
+		Badge,
+		Button,
+		Card,
+		Field,
+		Input,
+		Logo,
+		Numeric,
+		Select,
+		createFormatters
+	} from '@sahl/ui';
 	import Check from '@lucide/svelte/icons/check';
 	import Plus from '@lucide/svelte/icons/plus';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
 	import PinPrompt from '$lib/PinPrompt.svelte';
 
+	let showcaseChoice = $state('retail');
 	let showPin = $state(false);
 	let showPinError = $state(false);
 
@@ -214,6 +225,52 @@
 						<Input {id} {describedBy} disabled value="Karim Traders" />
 					{/snippet}
 				</Field>
+			</div>
+		</Card>
+
+		<Card label="Controls line up">
+			<div class="flex flex-col gap-3">
+				<p class="text-secondary text-text-secondary">
+					An input, a select and a button on one row. They share a height token and a padding value,
+					so they agree in both densities — toggle above and watch all three move together. Ten
+					screens had previously hand-rolled the select: three different height tokens between them,
+					and six used one that is <em>smaller</em> than the control height in compact, so those rendered
+					28px tall beside a 32px input.
+				</p>
+				<div class="flex items-end gap-2">
+					<Field id="showcase-input" label="Text" class="flex-1">
+						{#snippet children({ id, describedBy })}
+							<Input {id} {describedBy} placeholder="Karim Traders" />
+						{/snippet}
+					</Field>
+					<Field id="showcase-select" label="Choice" class="flex-1">
+						{#snippet children({ id, describedBy })}
+							<Select
+								{id}
+								{describedBy}
+								bind:value={showcaseChoice}
+								options={[
+									{ value: 'retail', label: 'Retail' },
+									{ value: 'cafe', label: 'Café' },
+									{ value: 'grocery', label: 'Grocery' }
+								]}
+							/>
+						{/snippet}
+					</Field>
+					<Button variant="secondary">Apply</Button>
+				</div>
+				<div class="flex items-end gap-2">
+					<Field id="showcase-invalid" label="Refused" error="Pick one" class="flex-1">
+						{#snippet children({ id, describedBy, invalid })}
+							<Select {id} {describedBy} {invalid} options={[{ value: '', label: 'Choose…' }]} />
+						{/snippet}
+					</Field>
+					<Field id="showcase-disabled" label="Locked" class="flex-1">
+						{#snippet children({ id, describedBy })}
+							<Select {id} {describedBy} disabled options={[{ value: 'x', label: 'Fixed' }]} />
+						{/snippet}
+					</Field>
+				</div>
 			</div>
 		</Card>
 

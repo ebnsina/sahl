@@ -296,7 +296,7 @@
 
 <svelte:head><title>Sell · Sahl</title></svelte:head>
 
-<div data-density="touch" class="bg-canvas text-text flex h-screen flex-col">
+<div data-density="touch" class="bg-canvas text-text flex h-dvh flex-col">
 	<header class="border-border bg-surface flex shrink-0 items-center gap-3 border-b px-4 py-2.5">
 		<Logo size={22} withWordmark />
 

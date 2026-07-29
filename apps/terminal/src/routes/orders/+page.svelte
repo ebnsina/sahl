@@ -14,6 +14,7 @@
 		Field,
 		Input,
 		Numeric,
+		Select,
 		createFormatters,
 		minorToDecimalString,
 		parseMinor
@@ -266,7 +267,7 @@
 
 <svelte:head><title>Orders — Sahl</title></svelte:head>
 
-<main class="bg-canvas text-text flex min-h-dvh flex-col" data-density="touch">
+<main class="bg-canvas text-text flex h-dvh flex-col" data-density="touch">
 	<header class="border-border bg-surface flex items-center justify-between border-b px-4 py-3">
 		<div class="flex items-center gap-3">
 			<h1 class="text-lg font-semibold">Orders</h1>
@@ -298,7 +299,7 @@
 			</Card>
 		</div>
 	{:else}
-		<div class="grid flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_24rem]">
+		<div class="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_24rem]">
 			<div class="flex flex-col gap-4">
 				{#if orders.length === 0}
 					<Card label="No orders">
@@ -480,17 +481,7 @@
 							</p>
 							<Field id="close-reason" label="Reason">
 								{#snippet children({ id, describedBy })}
-									<select
-										{id}
-										aria-describedby={describedBy}
-										bind:value={closeReason}
-										class="border-border bg-surface text-body w-full border px-3"
-										style="min-height: var(--scale-touch-target)"
-									>
-										{#each CLOSE_REASONS as reason (reason.value)}
-											<option value={reason.value}>{reason.label}</option>
-										{/each}
-									</select>
+									<Select {id} {describedBy} bind:value={closeReason} options={CLOSE_REASONS} />
 								{/snippet}
 							</Field>
 							<div class="flex gap-2">
@@ -538,17 +529,15 @@
 								<div class="border-border flex flex-col gap-2 border-t pt-3">
 									<Field id="line-product-{index}" label="Product">
 										{#snippet children({ id, describedBy })}
-											<select
+											<Select
 												{id}
-												aria-describedby={describedBy}
+												{describedBy}
 												bind:value={line.productId}
-												class="border-border bg-surface text-body w-full border px-3"
-												style="min-height: var(--scale-touch-target)"
-											>
-												{#each PRODUCTS as product (product.id)}
-													<option value={product.id}>{product.name}</option>
-												{/each}
-											</select>
+												options={PRODUCTS.map((product) => ({
+													value: product.id,
+													label: product.name
+												}))}
+											/>
 										{/snippet}
 									</Field>
 									<div class="flex gap-2">

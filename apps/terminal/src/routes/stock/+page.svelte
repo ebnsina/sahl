@@ -17,6 +17,7 @@
 		Field,
 		Input,
 		Numeric,
+		Select,
 		createFormatters,
 		parseMinor
 	} from '@sahl/ui';
@@ -225,7 +226,7 @@
 
 <svelte:head><title>Stock — Sahl</title></svelte:head>
 
-<main class="bg-canvas text-text flex min-h-dvh flex-col" data-density="touch">
+<main class="bg-canvas text-text flex h-dvh flex-col" data-density="touch">
 	<header class="border-border bg-surface flex items-center justify-between border-b px-4 py-3">
 		<div class="flex items-center gap-3">
 			<h1 class="text-lg font-semibold">Stock</h1>
@@ -261,7 +262,7 @@
 			</Card>
 		</div>
 	{:else}
-		<div class="grid flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_24rem]">
+		<div class="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_24rem]">
 			<div class="flex flex-col gap-4">
 				<Card label="On hand" flush>
 					{#if !stock || stock.batches.length === 0}
@@ -396,17 +397,7 @@
 						<div class="flex flex-col gap-3">
 							<Field id="issue-reason" label="Reason">
 								{#snippet children({ id, describedBy })}
-									<select
-										{id}
-										aria-describedby={describedBy}
-										bind:value={issueReason}
-										class="border-border bg-surface text-body w-full border px-3"
-										style="min-height: var(--scale-touch-target)"
-									>
-										{#each ISSUE_REASONS as reason (reason.value)}
-											<option value={reason.value}>{reason.label}</option>
-										{/each}
-									</select>
+									<Select {id} {describedBy} bind:value={issueReason} options={ISSUE_REASONS} />
 								{/snippet}
 							</Field>
 							<Field id="issue-quantity" label="Quantity">
@@ -447,17 +438,15 @@
 
 							<Field id="receive-product" label="Product">
 								{#snippet children({ id, describedBy })}
-									<select
+									<Select
 										{id}
-										aria-describedby={describedBy}
+										{describedBy}
 										bind:value={productId}
-										class="border-border bg-surface text-body w-full border px-3"
-										style="min-height: var(--scale-touch-target)"
-									>
-										{#each PRODUCTS as product (product.id)}
-											<option value={product.id}>{product.name}</option>
-										{/each}
-									</select>
+										options={PRODUCTS.map((product) => ({
+											value: product.id,
+											label: product.name
+										}))}
+									/>
 								{/snippet}
 							</Field>
 

@@ -13,6 +13,7 @@ export { default as Field } from './components/Field.svelte';
 export { default as Input } from './components/Input.svelte';
 export { default as Logo } from './components/Logo.svelte';
 export { default as Numeric } from './components/Numeric.svelte';
+export { default as Select } from './components/Select.svelte';
 
 export { createFormatters, minorToDecimalString, parseMinor, FormatError } from './lib/format.js';
 export type { CurrencyCode, FormatContext, Formatters, Locale } from './lib/format.js';

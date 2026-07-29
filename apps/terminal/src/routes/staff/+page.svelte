@@ -9,7 +9,7 @@
 	 * The first person enrolled needs no approval — there is nobody yet to give it. Everyone after
 	 * them needs an owner's PIN, and the till enforces that, not this screen.
 	 */
-	import { Badge, Button, Card, Field, Input, Numeric, createFormatters } from '@sahl/ui';
+	import { Badge, Button, Card, Field, Input, Numeric, Select, createFormatters } from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
 	import { asTillError, isTillAvailable, till, type AuditView, type StaffView } from '$lib/till';
 
@@ -134,7 +134,7 @@
 
 <svelte:head><title>Staff — Sahl</title></svelte:head>
 
-<main class="bg-canvas text-text flex min-h-dvh flex-col" data-density="touch">
+<main class="bg-canvas text-text flex h-dvh flex-col" data-density="touch">
 	<header class="border-border bg-surface flex items-center justify-between border-b px-4 py-3">
 		<div class="flex items-center gap-3">
 			<h1 class="text-lg font-semibold">Staff</h1>
@@ -170,7 +170,7 @@
 			</Card>
 		</div>
 	{:else}
-		<div class="grid flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_24rem]">
+		<div class="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_24rem]">
 			<div class="flex flex-col gap-4">
 				<Card label="Who works here" flush>
 					{#if staff.length === 0}
@@ -251,18 +251,13 @@
 
 						<Field id="staff-role" label="Role">
 							{#snippet children({ id, describedBy })}
-								<select
+								<Select
 									{id}
-									aria-describedby={describedBy}
+									{describedBy}
 									bind:value={role}
+									options={ROLES}
 									disabled={firstPerson}
-									class="border-border bg-surface text-body w-full border px-3 disabled:opacity-50"
-									style="min-height: var(--scale-touch-target)"
-								>
-									{#each ROLES as entry (entry.value)}
-										<option value={entry.value}>{entry.label}</option>
-									{/each}
-								</select>
+								/>
 							{/snippet}
 						</Field>
 

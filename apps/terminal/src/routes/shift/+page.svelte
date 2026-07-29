@@ -18,6 +18,7 @@
 		Field,
 		Input,
 		Numeric,
+		Select,
 		createFormatters,
 		parseMinor
 	} from '@sahl/ui';
@@ -199,7 +200,7 @@
 
 <svelte:head><title>Shift — Sahl</title></svelte:head>
 
-<main class="bg-canvas text-text flex min-h-dvh flex-col" data-density="touch">
+<main class="bg-canvas text-text flex h-dvh flex-col" data-density="touch">
 	<header class="border-border bg-surface flex items-center justify-between border-b px-4 py-3">
 		<div class="flex items-center gap-3">
 			<h1 class="text-lg font-semibold">Shift</h1>
@@ -262,7 +263,7 @@
 			</Card>
 		</div>
 	{:else}
-		<div class="grid flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_24rem]">
+		<div class="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_24rem]">
 			<div class="flex flex-col gap-4">
 				<Card label={closed ? 'Z report' : 'X report'}>
 					<dl class="flex flex-col gap-2">
@@ -394,17 +395,7 @@
 						<div class="flex flex-col gap-3">
 							<Field id="move-reason" label="Reason">
 								{#snippet children({ id, describedBy })}
-									<select
-										{id}
-										aria-describedby={describedBy}
-										bind:value={moveReason}
-										class="border-border bg-surface text-body w-full border px-3"
-										style="min-height: var(--scale-touch-target)"
-									>
-										{#each REASONS as reason (reason.value)}
-											<option value={reason.value}>{reason.label}</option>
-										{/each}
-									</select>
+									<Select {id} {describedBy} bind:value={moveReason} options={REASONS} />
 								{/snippet}
 							</Field>
 

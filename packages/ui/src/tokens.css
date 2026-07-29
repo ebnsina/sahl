@@ -48,6 +48,11 @@
 	--scale-control-height: 2rem;
 	--scale-touch-target: 1.75rem;
 	--scale-gap: 0.5rem;
+
+	/* Tells the browser which way to render native form chrome — a select's arrow, a date picker,
+	   a scrollbar. Without it every one of those stays light on a dark page, which is not something
+	   any component class can fix because the chrome is drawn by the platform. */
+	color-scheme: light;
 }
 
 [data-density='touch'] {
@@ -176,6 +181,8 @@
  * ------------------------------------------------------------------------------------------- */
 
 [data-theme='dark'] {
+	color-scheme: dark;
+
 	--semantic-canvas: var(--neutral-950);
 	--semantic-surface: var(--neutral-900);
 	--semantic-surface-sunken: var(--neutral-950);

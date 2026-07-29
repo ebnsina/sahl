@@ -11,7 +11,7 @@
 	 * back to support, so it carries the device identity and the fiscal position too.
 	 */
 	import Building2 from '@lucide/svelte/icons/building-2';
-	import { Badge, Button, Card, Field, Input, Logo, createFormatters } from '@sahl/ui';
+	import { Badge, Button, Card, Field, Input, Logo, Select, createFormatters } from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
 	import { asTillError, isTillAvailable, till, type OutletView } from '$lib/till';
 
@@ -165,7 +165,7 @@
 
 <svelte:head><title>Settings — Sahl</title></svelte:head>
 
-<main class="bg-canvas text-text flex min-h-dvh flex-col" data-density="compact">
+<main class="bg-canvas text-text flex h-dvh flex-col" data-density="compact">
 	<header class="border-border bg-surface flex items-center justify-between border-b px-4 py-3">
 		<div class="flex items-center gap-3">
 			<h1 class="text-lg font-semibold">Settings</h1>
@@ -194,7 +194,7 @@
 			</Card>
 		</div>
 	{:else}
-		<div class="grid flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_22rem]">
+		<div class="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[1fr_22rem]">
 			<div class="flex flex-col gap-4">
 				<Card label="This outlet">
 					<div class="flex flex-col gap-3">
@@ -228,17 +228,7 @@
 
 						<Field id="outlet-profile" label="What kind of shop">
 							{#snippet children({ id, describedBy })}
-								<select
-									{id}
-									aria-describedby={describedBy}
-									bind:value={profile}
-									class="border-border bg-surface text-body w-full border px-3"
-									style="min-height: var(--scale-control-height)"
-								>
-									{#each PROFILES as entry (entry.value)}
-										<option value={entry.value}>{entry.label}</option>
-									{/each}
-								</select>
+								<Select {id} {describedBy} bind:value={profile} options={PROFILES} />
 							{/snippet}
 						</Field>
 						<p class="text-secondary text-text-muted -mt-2">
@@ -248,33 +238,26 @@
 						<div class="grid grid-cols-2 gap-3">
 							<Field id="outlet-currency" label="Currency">
 								{#snippet children({ id, describedBy })}
-									<select
+									<Select
 										{id}
-										aria-describedby={describedBy}
+										{describedBy}
 										bind:value={currency}
-										class="border-border bg-surface text-body w-full border px-3"
-										style="min-height: var(--scale-control-height)"
-									>
-										{#each ['BDT', 'SAR', 'AED', 'USD'] as code (code)}
-											<option value={code}>{code}</option>
-										{/each}
-									</select>
+										options={['BDT', 'SAR', 'AED', 'USD'].map((code) => ({
+											value: code,
+											label: code
+										}))}
+									/>
 								{/snippet}
 							</Field>
 
 							<Field id="outlet-timezone" label="Timezone" hint="Which day a sale belongs to.">
 								{#snippet children({ id, describedBy })}
-									<select
+									<Select
 										{id}
-										aria-describedby={describedBy}
+										{describedBy}
 										bind:value={timezone}
-										class="border-border bg-surface text-body w-full border px-3"
-										style="min-height: var(--scale-control-height)"
-									>
-										{#each TIMEZONES as zone (zone)}
-											<option value={zone}>{zone}</option>
-										{/each}
-									</select>
+										options={TIMEZONES.map((zone) => ({ value: zone, label: zone }))}
+									/>
 								{/snippet}
 							</Field>
 						</div>
@@ -285,17 +268,7 @@
 					<div class="flex flex-col gap-3">
 						<Field id="outlet-regime" label="Fiscal regime">
 							{#snippet children({ id, describedBy })}
-								<select
-									{id}
-									aria-describedby={describedBy}
-									bind:value={regime}
-									class="border-border bg-surface text-body w-full border px-3"
-									style="min-height: var(--scale-control-height)"
-								>
-									{#each REGIMES as entry (entry.value)}
-										<option value={entry.value}>{entry.label}</option>
-									{/each}
-								</select>
+								<Select {id} {describedBy} bind:value={regime} options={REGIMES} />
 							{/snippet}
 						</Field>
 						<p class="text-secondary text-text-muted -mt-2">
