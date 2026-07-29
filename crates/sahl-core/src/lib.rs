@@ -30,6 +30,7 @@
 
 pub mod event;
 pub mod inventory;
+pub mod ledger;
 pub mod money;
 pub mod policy;
 pub mod projection;

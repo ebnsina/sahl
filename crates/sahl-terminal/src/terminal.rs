@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use sahl_core::event::{EventChain, EventEnvelope, EventHeader};
 use sahl_core::inventory::{InventoryBook, InventoryError, InventoryEvent};
+use sahl_core::ledger::{FiscalChain, FiscalEvent, FiscalTip, InvoiceContent};
 use sahl_core::policy::lease::ClaimVerdict;
 use sahl_core::projection::SaleBook;
 use sahl_core::purchasing::{PurchaseError, PurchaseEvent, PurchaseOrder};
@@ -53,6 +54,9 @@ pub enum TerminalError {
 
     #[error("{0}")]
     Purchase(#[from] PurchaseError),
+
+    #[error("{0}")]
+    Fiscal(#[from] sahl_core::ledger::FiscalError),
 
     #[error("no purchase order {order_id}")]
     UnknownOrder { order_id: Uuid },
@@ -102,33 +106,48 @@ pub struct Terminal {
     shift: Option<Shift>,
     stock: InventoryBook,
     staff: Directory,
+    /// The fiscal sequence. Separate from the event chain: that one proves the record of what
+    /// happened is intact, this one proves the sequence of invoices is.
+    fiscal: FiscalChain,
     /// Several orders are open at once, unlike the single drawer — so a map, not an Option.
     orders: BTreeMap<Uuid, PurchaseOrder>,
     identity: DeviceIdentity,
 }
 
 impl Terminal {
-    /// Load a terminal from its store, rebuilding the projection and verifying the chain.
+    /// Load a terminal from its store, rebuilding the projections and verifying the chain.
     ///
-    /// Verification on load is deliberate. It costs a pass over the log at startup and it is the
-    /// only moment a tampered local database is cheap to catch — before the device starts writing
-    /// new events on top of a chain that no longer holds.
+    /// Two different reads, deliberately. **Verification** runs over this device's own events,
+    /// because the hash chain is per device and a merged stream would not verify. **Projections**
+    /// are built from every event including siblings', because a shop's takings and open tickets
+    /// are the outlet's, not one till's.
+    ///
+    /// Getting that split wrong is quiet and expensive: rebuilding projections from local events
+    /// only means a restart silently drops every sale pulled from another till, and the sync cursor
+    /// has already moved past them so they never come back.
+    ///
+    /// Verification on load is itself deliberate. It costs a pass over the log at startup and it is
+    /// the only moment a tampered local database is cheap to catch — before the device starts
+    /// writing new events on top of a chain that no longer holds.
     ///
     /// # Errors
     /// [`TerminalError::CorruptLog`] if the stored chain does not verify.
     pub fn load(store: EventStore, identity: DeviceIdentity) -> Result<Self, TerminalError> {
-        let stored = store.load_all()?;
+        let own = store.load_all()?;
 
-        sahl_core::event::verify_chain_from_genesis(&stored).map_err(|error| {
+        sahl_core::event::verify_chain_from_genesis(&own).map_err(|error| {
             TerminalError::CorruptLog {
                 reason: error.to_string(),
             }
         })?;
 
+        let stored = store.load_projection_input()?;
+
         let mut book = SaleBook::new();
         let mut stock = InventoryBook::new();
         let mut staff = Directory::new();
         let mut purchase_events: BTreeMap<Uuid, Vec<PurchaseEvent>> = BTreeMap::new();
+        let mut fiscal_tip = FiscalTip::GENESIS;
         let mut shift_events: Vec<ShiftEvent> = Vec::new();
         for envelope in &stored {
             // Sale and shift events project separately; anything else belongs to a projection this
@@ -136,7 +155,10 @@ impl Terminal {
             match envelope.kind.as_str() {
                 kind if kind.starts_with("sale.") => {
                     if let Ok(event) = envelope.payload_as::<SaleEvent>() {
-                        book.apply(&event)?;
+                        // A sibling's history can reach this store mid-sale, so a partial ticket is
+                        // expected rather than corrupt — skip what does not apply and keep the rest,
+                        // matching what the sync path does after a pull.
+                        book.apply(&event).ok();
                     }
                 }
                 kind if kind.starts_with("shift.") => {
@@ -152,6 +174,20 @@ impl Terminal {
                 kind if kind.starts_with("staff.") => {
                     if let Ok(event) = envelope.payload_as::<StaffEvent>() {
                         staff.apply(&event)?;
+                    }
+                }
+                kind if kind.starts_with("fiscal.") => {
+                    if let Ok(FiscalEvent::InvoiceIssued { seal, .. }) =
+                        envelope.payload_as::<FiscalEvent>()
+                    {
+                        // Only this device's own invoices advance its counter. A sibling's arrive
+                        // through sync and belong to that device's sequence, not this one's.
+                        if seal.device_id == identity.device_id {
+                            fiscal_tip = FiscalTip {
+                                counter: seal.counter,
+                                hash: seal.hash,
+                            };
+                        }
                     }
                 }
                 kind if kind.starts_with("purchase.") => {
@@ -176,6 +212,7 @@ impl Terminal {
             shift: latest_open_shift(&shift_events)?,
             stock,
             staff,
+            fiscal: FiscalChain::resume(identity.device_id, fiscal_tip),
             orders: purchase_events
                 .into_iter()
                 .filter_map(|(order_id, events)| {
@@ -346,6 +383,74 @@ impl Terminal {
         let envelope = self.seal(event, event_id, occurred_at)?;
         self.orders.insert(order_id, candidate);
         Ok(envelope)
+    }
+
+    /// Complete a sale and issue its invoice, in one atomic write.
+    ///
+    /// Two events because they answer to different authorities: `sale.completed` is the shop's
+    /// record of a transaction, `fiscal.invoice_issued` is the state's record of an invoice. They
+    /// must land together — a completed sale with no invoice number is unaccounted for, and an
+    /// invoice number with no sale is a gap someone has to explain.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the sale cannot be completed or the write fails. Nothing is written and
+    /// neither projection moves when this returns an error.
+    pub fn complete_sale(
+        &mut self,
+        event: &SaleEvent,
+        regime: &str,
+        issued_by: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<sahl_core::ledger::InvoiceSeal, TerminalError> {
+        self.assert_may_write(event, occurred_at)?;
+
+        let mut candidate = self.book.clone();
+        candidate.apply(event)?;
+
+        // Totals come from the candidate, after completion — the invoice must record what the sale
+        // settled at, not what it looked like a moment before.
+        let totals = candidate
+            .get(event.sale_id())
+            .ok_or(TerminalError::UnknownSale {
+                sale_id: event.sale_id(),
+            })?
+            .totals()?;
+
+        let content = InvoiceContent {
+            totals,
+            regime: regime.to_owned(),
+        };
+
+        // Sealed against a copy of the chain, so a failed write cannot burn an invoice number —
+        // a gap in the fiscal sequence is exactly what the counter exists to make impossible.
+        let mut chain = self.fiscal.clone();
+        let seal = chain.seal(event.sale_id(), occurred_at, &content)?;
+
+        let fiscal = FiscalEvent::InvoiceIssued {
+            seal: seal.clone(),
+            content,
+            at: occurred_at,
+            issued_by,
+        };
+
+        let sale_envelope = self
+            .chain
+            .append(self.header(Uuid::now_v7(), occurred_at), event)?;
+        let fiscal_envelope = self
+            .chain
+            .append(self.header(Uuid::now_v7(), occurred_at), &fiscal)?;
+
+        self.store.append_all(&[sale_envelope, fiscal_envelope])?;
+
+        self.book = candidate;
+        self.fiscal = chain;
+        Ok(seal)
+    }
+
+    /// Where this device's fiscal sequence has got to.
+    #[must_use]
+    pub const fn fiscal_tip(&self) -> FiscalTip {
+        self.fiscal.tip()
     }
 
     /// Book a delivery in against an order, in one atomic write.
@@ -1615,6 +1720,293 @@ mod tests {
             till.approve(Permission::ManageStaff, "7712")
                 .expect("approves"),
             id(0x0E)
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The fiscal sequence
+    // ------------------------------------------------------------------------------------------
+
+    fn ring_up(till: &mut Terminal, base: u128, minor: i64) {
+        let sale = id(base);
+        till.record(
+            &SaleEvent::Opened {
+                sale_id: sale,
+                opened_by: id(CASHIER),
+                currency: BDT,
+                pricing_mode: PricingMode::TaxInclusive,
+                rounding: Rounding::HalfUp,
+            },
+            id(base + 1),
+            at(0),
+        )
+        .expect("opens");
+        till.record(
+            &SaleEvent::LineAdded {
+                sale_id: sale,
+                line_id: id(base + 2),
+                product_id: id(12),
+                name: "Rice 5kg".to_owned(),
+                unit_price: Money::from_minor(minor, BDT),
+                quantity: Quantity::ONE,
+                tax_class: TaxClass::standard(1500),
+            },
+            id(base + 3),
+            at(1),
+        )
+        .expect("adds");
+        till.record(
+            &SaleEvent::TenderRecorded {
+                sale_id: sale,
+                tender_id: id(base + 4),
+                method: TenderMethod::Cash,
+                amount: Money::from_minor(minor, BDT),
+                reference: None,
+            },
+            id(base + 5),
+            at(2),
+        )
+        .expect("tenders");
+    }
+
+    fn settle(till: &mut Terminal, base: u128, minor: i64) -> sahl_core::ledger::InvoiceSeal {
+        till.complete_sale(
+            &SaleEvent::Completed {
+                sale_id: id(base),
+                total: Money::from_minor(minor, BDT),
+                change_given: Money::from_minor(0, BDT),
+                at: at(3),
+            },
+            "bd_mushak",
+            id(CASHIER),
+            at(3),
+        )
+        .expect("completes")
+    }
+
+    #[test]
+    fn completing_a_sale_issues_the_next_invoice_number() {
+        let mut till = fresh();
+        ring_up(&mut till, 0x100, 11_500);
+        let first = settle(&mut till, 0x100, 11_500);
+
+        ring_up(&mut till, 0x200, 34_000);
+        let second = settle(&mut till, 0x200, 34_000);
+
+        assert_eq!(first.counter, 1, "invoices start at one");
+        assert_eq!(second.counter, 2);
+        assert!(first.previous_hash.is_genesis());
+        assert_eq!(second.previous_hash, first.hash, "each embeds the last");
+    }
+
+    #[test]
+    fn a_refused_completion_does_not_burn_an_invoice_number() {
+        // The reason the seal is taken against a copy of the chain. A gap in the fiscal sequence is
+        // precisely what the counter exists to make impossible, and an inspector cannot tell a
+        // burnt number from a deleted sale.
+        let mut till = fresh();
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        let before = till.fiscal_tip();
+        // Completing the same sale twice is refused by the aggregate.
+        let refused = till.complete_sale(
+            &SaleEvent::Completed {
+                sale_id: id(0x100),
+                total: Money::from_minor(11_500, BDT),
+                change_given: Money::from_minor(0, BDT),
+                at: at(4),
+            },
+            "bd_mushak",
+            id(CASHIER),
+            at(4),
+        );
+
+        assert!(refused.is_err());
+        assert_eq!(till.fiscal_tip(), before, "the counter did not move");
+    }
+
+    #[test]
+    fn the_fiscal_sequence_survives_a_restart() {
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        ring_up(&mut till, 0x100, 11_500);
+        let first = settle(&mut till, 0x100, 11_500);
+
+        let (store, _) = till.into_parts();
+        let mut reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.fiscal_tip().counter, 1);
+        ring_up(&mut reloaded, 0x200, 34_000);
+        let second = settle(&mut reloaded, 0x200, 34_000);
+
+        assert_eq!(second.counter, 2, "no restart of the sequence");
+        assert_eq!(
+            second.previous_hash, first.hash,
+            "and no break in the chain"
+        );
+    }
+
+    #[test]
+    fn the_invoice_records_what_the_sale_settled_at() {
+        // Sealed from the completed sale, not from a snapshot taken before completion.
+        let mut till = fresh();
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        let stored = till.store.load_all().expect("reads");
+        let issued = stored
+            .iter()
+            .find(|envelope| envelope.kind == "fiscal.invoice_issued")
+            .expect("present")
+            .payload_as::<sahl_core::ledger::FiscalEvent>()
+            .expect("decodes");
+
+        let sahl_core::ledger::FiscalEvent::InvoiceIssued { content, seal, .. } = issued;
+        assert_eq!(content.totals.total, Money::from_minor(11_500, BDT));
+        assert_eq!(content.regime, "bd_mushak");
+        assert_eq!(seal.sale_id, id(0x100));
+    }
+
+    #[test]
+    fn a_restart_keeps_sales_pulled_from_another_till() {
+        // Found by mutation-testing the fiscal guard: startup rebuilt projections from local
+        // events only while the sync path used every event, so a restart silently dropped every
+        // sibling's sale — and the sync cursor had already moved past them, so they never returned.
+        // A two-till shop would under-report its takings from the first reboot onwards.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        let (mut store, _) = till.into_parts();
+
+        // A sibling's completed sale arrives through sync.
+        let sibling = id(0x51B);
+        let mut their_events = sahl_core::event::EventChain::new(sibling);
+        let their_sale = id(0x700);
+        let mut seq = 0_i64;
+        for event in [
+            SaleEvent::Opened {
+                sale_id: their_sale,
+                opened_by: id(CASHIER),
+                currency: BDT,
+                pricing_mode: PricingMode::TaxInclusive,
+                rounding: Rounding::HalfUp,
+            },
+            SaleEvent::LineAdded {
+                sale_id: their_sale,
+                line_id: id(0x701),
+                product_id: id(12),
+                name: "Tea 400g".to_owned(),
+                unit_price: Money::from_minor(32_000, BDT),
+                quantity: Quantity::ONE,
+                tax_class: TaxClass::standard(1500),
+            },
+            SaleEvent::TenderRecorded {
+                sale_id: their_sale,
+                tender_id: id(0x702),
+                method: TenderMethod::Cash,
+                amount: Money::from_minor(32_000, BDT),
+                reference: None,
+            },
+            SaleEvent::Completed {
+                sale_id: their_sale,
+                total: Money::from_minor(32_000, BDT),
+                change_given: Money::from_minor(0, BDT),
+                at: at(20),
+            },
+        ] {
+            let envelope = their_events
+                .append(
+                    EventHeader {
+                        event_id: Uuid::now_v7(),
+                        tenant_id: identity().tenant_id,
+                        outlet_id: identity().outlet_id,
+                        device_id: sibling,
+                        occurred_at: at(20),
+                    },
+                    &event,
+                )
+                .expect("appends");
+            seq += 1;
+            store.insert_remote(&envelope, seq).expect("stores");
+        }
+
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(
+            reloaded.book().len(),
+            2,
+            "both tills' sales survive a restart"
+        );
+        assert_eq!(
+            reloaded.takings(BDT).expect("sums"),
+            Money::from_minor(43_500, BDT),
+            "the outlet's takings, not this till's"
+        );
+    }
+
+    #[test]
+    fn a_siblings_invoices_do_not_advance_this_devices_counter() {
+        // Invoices arrive through sync from other tills. Each device owns its own sequence, so a
+        // busy neighbour must not push this till's next invoice number forward — two tills would
+        // otherwise race each other up the same counter and leave gaps in both.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        // A sibling device seals three invoices of its own and they reach this store through sync.
+        let sibling = id(0x51B);
+        let mut their_chain = sahl_core::ledger::FiscalChain::new(sibling);
+        let mut their_events = sahl_core::event::EventChain::new(sibling);
+        let (mut store, book) = till.into_parts();
+
+        for n in 1..=3_u128 {
+            let content = sahl_core::ledger::InvoiceContent {
+                totals: sahl_core::tax::calculate(&sahl_core::tax::OrderInput::new(
+                    BDT,
+                    vec![sahl_core::tax::LineInput::new(
+                        Money::from_minor(5_000, BDT),
+                        Quantity::ONE,
+                        TaxClass::standard(1500),
+                    )],
+                ))
+                .expect("calculates"),
+                regime: "bd_mushak".to_owned(),
+            };
+            let seal = their_chain
+                .seal(id(0x900 + n), at(10), &content)
+                .expect("seals");
+            let envelope = their_events
+                .append(
+                    EventHeader {
+                        event_id: Uuid::now_v7(),
+                        tenant_id: identity().tenant_id,
+                        outlet_id: identity().outlet_id,
+                        device_id: sibling,
+                        occurred_at: at(10),
+                    },
+                    &sahl_core::ledger::FiscalEvent::InvoiceIssued {
+                        seal,
+                        content,
+                        at: at(10),
+                        issued_by: id(CASHIER),
+                    },
+                )
+                .expect("appends");
+            store
+                .insert_remote(&envelope, i64::try_from(n).expect("small"))
+                .expect("stores");
+        }
+        drop(book);
+
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+        assert_eq!(
+            reloaded.fiscal_tip().counter,
+            1,
+            "three of the sibling's invoices, and this till is still on its own first"
         );
     }
 }

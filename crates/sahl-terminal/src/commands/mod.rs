@@ -82,7 +82,9 @@ impl From<TerminalError> for CommandError {
             TerminalError::Sale(_) | TerminalError::Shift(_) | TerminalError::Inventory(_) => {
                 "rejected"
             }
-            TerminalError::Directory(_) | TerminalError::Purchase(_) => "rejected",
+            TerminalError::Directory(_) | TerminalError::Purchase(_) | TerminalError::Fiscal(_) => {
+                "rejected"
+            }
             TerminalError::UnknownOrder { .. } => "unknown_order",
             TerminalError::NotAuthorized => "not_authorized",
             TerminalError::NoApprover => "no_approver",
@@ -346,7 +348,11 @@ pub fn record_tender(
 /// The total and change are taken from the till's own calculation, never from the UI. The webview
 /// could not supply them correctly even if it wanted to, which is the point.
 #[tauri::command]
-pub fn complete_sale(state: tauri::State<'_, TerminalState>, sale_id: Uuid) -> CommandResult {
+pub fn complete_sale(
+    state: tauri::State<'_, TerminalState>,
+    sale_id: Uuid,
+    cashier_id: Uuid,
+) -> CommandResult {
     let (total, change) = {
         let terminal = state.inner.lock().map_err(|_| CommandError {
             code: "poisoned",
@@ -364,8 +370,12 @@ pub fn complete_sale(state: tauri::State<'_, TerminalState>, sale_id: Uuid) -> C
         (total.total, change)
     };
 
-    apply(
-        &state,
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    terminal.complete_sale(
         &SaleEvent::Completed {
             sale_id,
             total,
@@ -374,7 +384,18 @@ pub fn complete_sale(state: tauri::State<'_, TerminalState>, sale_id: Uuid) -> C
             // clock at the moment of closing, not from the UI.
             at: now(),
         },
-    )
+        // Configured per outlet once onboarding lands. Until then every till is unregistered,
+        // which is a real deployment rather than a placeholder — see `sahl_fiscal::noop`.
+        "none",
+        cashier_id,
+        now(),
+    )?;
+
+    let sale = terminal.sale(sale_id)?;
+    SaleView::of(sale).map_err(|error| CommandError {
+        code: "rejected",
+        message: error.to_string(),
+    })
 }
 
 #[tauri::command]

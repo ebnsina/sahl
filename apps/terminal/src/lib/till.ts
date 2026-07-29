@@ -252,7 +252,8 @@ export const till = {
 		reference?: string | null;
 	}) => call<SaleView>('record_tender', input),
 
-	completeSale: (saleId: string) => call<SaleView>('complete_sale', { saleId }),
+	completeSale: (saleId: string, cashierId: string) =>
+		call<SaleView>('complete_sale', { saleId, cashierId }),
 
 	abandonSale: (saleId: string, abandonedBy: string) =>
 		call<SaleView>('abandon_sale', { saleId, abandonedBy }),

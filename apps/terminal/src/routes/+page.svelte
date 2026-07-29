@@ -185,7 +185,7 @@
 		const current = sale;
 		if (!current) return;
 		void run(
-			() => till.completeSale(current.id),
+			() => till.completeSale(current.id, CASHIER),
 			(result) => (sale = result)
 		);
 	}
