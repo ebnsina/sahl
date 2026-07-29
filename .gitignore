@@ -1,0 +1,36 @@
+# Internal planning docs and local data — never committed.
+docs/
+data/
+
+# Rust
+target/
+**/*.rs.bk
+
+# Node
+node_modules/
+.pnpm-store/
+dist/
+build/
+.svelte-kit/
+.vite/
+
+# Tauri
+crates/sahl-terminal/gen/
+
+# Env — no secrets in the repo, ever.
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Test / coverage artifacts
+coverage/
+*.profraw
+# NOTE: proptest-regressions/ is deliberately NOT ignored — those files pin the
+# exact seeds that once broke the money math. Losing them loses the regression.
