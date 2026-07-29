@@ -28,6 +28,20 @@ hex = "0.4"
 proptest = "1"
 rstest = "0.24"
 
+# server
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+axum = "0.8"
+tower-http = { version = "0.7", features = ["trace", "cors", "limit"] }
+sqlx = { version = "0.9", default-features = false, features = [
+  "runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "time", "json", "migrate", "macros",
+] }
+ed25519-dalek = { version = "3", features = ["rand_core", "pkcs8"] }
+rand = "0.9"
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+subtle = "2"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
