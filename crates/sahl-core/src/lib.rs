@@ -33,6 +33,7 @@ pub mod inventory;
 pub mod money;
 pub mod policy;
 pub mod projection;
+pub mod purchasing;
 pub mod quantity;
 pub mod sale;
 pub mod shift;
