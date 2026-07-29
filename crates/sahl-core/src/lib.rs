@@ -31,6 +31,7 @@
 pub mod event;
 pub mod money;
 pub mod quantity;
+pub mod sale;
 pub mod tax;
 pub mod time;
 
@@ -40,6 +41,7 @@ pub use event::{
 };
 pub use money::{Currency, Money, MoneyError, Rate, Rounding};
 pub use quantity::Quantity;
+pub use sale::{Sale, SaleError, SaleEvent, SaleLine, SaleStatus, TenderMethod, VoidReason};
 pub use tax::{
     Discount, LineInput, LineTotals, OrderInput, OrderTotals, PricingMode, TaxClass, TaxError,
     TaxGroup, calculate,
