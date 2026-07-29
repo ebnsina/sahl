@@ -211,3 +211,81 @@ fn method_label(method: sahl_core::sale::TenderMethod) -> String {
         _ => "unknown".to_owned(),
     }
 }
+
+/// A shift as the close-out screen shows it.
+///
+/// Carries both the expected figure and the counted one rather than just the difference: a cashier
+/// reconciling a drawer needs to see which side of the comparison surprised them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShiftView {
+    pub id: Uuid,
+    pub cashier: Uuid,
+    /// False while the shift is running — an X report rather than a Z.
+    pub is_final: bool,
+    pub currency: &'static str,
+
+    pub opening_float_minor: i64,
+    pub takings_minor: i64,
+    pub cash_from_sales_minor: i64,
+    pub net_movements_minor: i64,
+    pub expected_cash_minor: i64,
+    /// `None` until the drawer has been counted. The blind count depends on this staying absent —
+    /// see [`ShiftView::blind`].
+    pub counted_cash_minor: Option<i64>,
+    /// `balanced`, `short`, or `over`; `None` before any count.
+    pub variance: Option<&'static str>,
+    pub variance_minor: Option<i64>,
+
+    pub sale_count: usize,
+    pub void_count: usize,
+    pub count_attempts: usize,
+}
+
+impl ShiftView {
+    #[must_use]
+    pub fn of(report: &sahl_core::shift::ShiftReport, currency: sahl_core::Currency) -> Self {
+        Self {
+            id: report.shift_id,
+            cashier: report.cashier,
+            is_final: report.is_final,
+            currency: currency.code(),
+            opening_float_minor: report.opening_float.minor(),
+            takings_minor: report.takings.minor(),
+            cash_from_sales_minor: report.cash_from_sales.minor(),
+            net_movements_minor: report.net_movements.minor(),
+            expected_cash_minor: report.expected_cash.minor(),
+            counted_cash_minor: report.counted_cash.map(sahl_core::Money::minor),
+            variance: report.variance.map(variance_label),
+            variance_minor: report.variance.map(|variance| variance.magnitude().minor()),
+            sale_count: report.sale_count,
+            void_count: report.void_count,
+            count_attempts: report.count_attempts,
+        }
+    }
+
+    /// The same report with every expectation removed, for the count screen.
+    ///
+    /// A blind count is the whole control: a cashier who can see what the drawer *should* hold can
+    /// count to that number instead of counting the cash. Withholding it here rather than in the UI
+    /// means no screen can leak it by accident.
+    #[must_use]
+    pub fn blind(mut self) -> Self {
+        self.expected_cash_minor = 0;
+        self.cash_from_sales_minor = 0;
+        self.net_movements_minor = 0;
+        self.takings_minor = 0;
+        self.counted_cash_minor = None;
+        self.variance = None;
+        self.variance_minor = None;
+        self
+    }
+}
+
+const fn variance_label(variance: sahl_core::shift::Variance) -> &'static str {
+    match variance {
+        sahl_core::shift::Variance::Balanced => "balanced",
+        sahl_core::shift::Variance::Short { .. } => "short",
+        sahl_core::shift::Variance::Over { .. } => "over",
+    }
+}

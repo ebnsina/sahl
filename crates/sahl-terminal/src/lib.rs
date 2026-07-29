@@ -109,6 +109,12 @@ pub fn run() {
             commands::get_sale,
             commands::till_status,
             commands::sync_status,
+            commands::open_shift,
+            commands::move_cash,
+            commands::count_drawer,
+            commands::shift_report,
+            commands::blind_count_sheet,
+            commands::close_shift,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");

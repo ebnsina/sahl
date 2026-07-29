@@ -16,6 +16,7 @@ use sahl_core::event::{EventChain, EventEnvelope, EventHeader};
 use sahl_core::policy::lease::ClaimVerdict;
 use sahl_core::projection::SaleBook;
 use sahl_core::sale::{Sale, SaleError, SaleEvent};
+use sahl_core::shift::{Shift, ShiftError, ShiftEvent, ShiftReport, ShiftStatus};
 use sahl_core::{Money, Timestamp};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -35,6 +36,17 @@ pub struct DeviceIdentity {
 pub enum TerminalError {
     #[error("{0}")]
     Sale(#[from] SaleError),
+
+    #[error("{0}")]
+    Shift(#[from] ShiftError),
+
+    #[error("no shift is open")]
+    NoOpenShift,
+
+    /// A second shift cannot start while one is running on this device — the drawer is physical and
+    /// there is only one of it.
+    #[error("a shift is already open on this till")]
+    ShiftAlreadyOpen,
 
     #[error("{0}")]
     Store(#[from] StoreError),
@@ -60,6 +72,8 @@ pub struct Terminal {
     store: EventStore,
     chain: EventChain,
     book: SaleBook,
+    /// The shift running on this till, if any. One drawer, so at most one.
+    shift: Option<Shift>,
     identity: DeviceIdentity,
 }
 
@@ -82,11 +96,22 @@ impl Terminal {
         })?;
 
         let mut book = SaleBook::new();
+        let mut shift_events: Vec<ShiftEvent> = Vec::new();
         for envelope in &stored {
-            // Only sale events project into the book; other kinds (shifts, stock) will have their
-            // own projections and are skipped rather than treated as an error.
-            if let Ok(event) = envelope.payload_as::<SaleEvent>() {
-                book.apply(&event)?;
+            // Sale and shift events project separately; anything else belongs to a projection this
+            // build does not have and is skipped rather than treated as an error.
+            match envelope.kind.as_str() {
+                kind if kind.starts_with("sale.") => {
+                    if let Ok(event) = envelope.payload_as::<SaleEvent>() {
+                        book.apply(&event)?;
+                    }
+                }
+                kind if kind.starts_with("shift.") => {
+                    if let Ok(event) = envelope.payload_as::<ShiftEvent>() {
+                        shift_events.push(event);
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -95,6 +120,7 @@ impl Terminal {
             store,
             chain,
             book,
+            shift: latest_open_shift(&shift_events)?,
             identity,
         })
     }
@@ -138,6 +164,81 @@ impl Terminal {
         // 4. Only now adopt the new state.
         self.book = candidate;
         Ok(envelope)
+    }
+
+    /// Validate, seal, persist, and project one shift event.
+    ///
+    /// Same four steps in the same order as [`Terminal::record`], for the same reason — a till that
+    /// shows a drawer count it did not persist is worse than one that refuses the count.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the event is invalid for the current state or cannot be persisted.
+    pub fn record_shift(
+        &mut self,
+        event: &ShiftEvent,
+        event_id: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<EventEnvelope, TerminalError> {
+        let running = self
+            .shift
+            .as_ref()
+            .filter(|shift| shift.status() == ShiftStatus::Open);
+
+        // Validated against a throwaway copy first, so a rejected action never reaches the log.
+        let candidate = match (running, event) {
+            (Some(_), ShiftEvent::Opened { .. }) => return Err(TerminalError::ShiftAlreadyOpen),
+            (Some(shift), _) => {
+                let mut candidate = shift.clone();
+                candidate.apply(event)?;
+                candidate
+            }
+            // A closed shift is history; opening the next one starts a fresh aggregate rather than
+            // reviving it, which is what keeps one drawer session from bleeding into the next.
+            (None, ShiftEvent::Opened { .. }) => Shift::replay(std::slice::from_ref(event))?,
+            (None, _) => return Err(TerminalError::NoOpenShift),
+        };
+
+        let envelope = self.seal_shift(event, event_id, occurred_at)?;
+        self.shift = Some(candidate);
+        Ok(envelope)
+    }
+
+    /// Seal and persist a shift event without touching the projection.
+    fn seal_shift(
+        &mut self,
+        event: &ShiftEvent,
+        event_id: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<EventEnvelope, TerminalError> {
+        let header = EventHeader {
+            event_id,
+            tenant_id: self.identity.tenant_id,
+            outlet_id: self.identity.outlet_id,
+            device_id: self.identity.device_id,
+            occurred_at,
+        };
+        let envelope = self.chain.append(header, event)?;
+        self.store.append(&envelope)?;
+        Ok(envelope)
+    }
+
+    /// The shift running on this till, if one is.
+    #[must_use]
+    pub const fn shift(&self) -> Option<&Shift> {
+        self.shift.as_ref()
+    }
+
+    /// The X/Z report for the running shift.
+    ///
+    /// Reads sales from the projection rather than being handed them, so the expected-cash figure
+    /// cannot be computed against a different set of sales than the screen is showing.
+    ///
+    /// # Errors
+    /// [`TerminalError::NoOpenShift`] if no shift is running; [`TerminalError::Shift`] on overflow.
+    pub fn shift_report(&self) -> Result<ShiftReport, TerminalError> {
+        let shift = self.shift.as_ref().ok_or(TerminalError::NoOpenShift)?;
+        let sales: Vec<&Sale> = self.book.completed().collect();
+        Ok(sahl_core::shift::report(shift, sales)?)
     }
 
     /// Refuse a write to a ticket held by an active sibling.
@@ -240,6 +341,28 @@ impl Terminal {
     }
 }
 
+/// Rebuild the shift a restart should resume.
+///
+/// Events are grouped by shift id and the last one replayed. Grouping matters because a till that
+/// has run for a week holds several closed shifts, and replaying them as one stream would fail on
+/// the second `Opened` — a crash mid-shift must reopen the drawer where it was, not refuse to boot.
+fn latest_open_shift(events: &[ShiftEvent]) -> Result<Option<Shift>, TerminalError> {
+    let Some(latest) = events.last().map(ShiftEvent::shift_id) else {
+        return Ok(None);
+    };
+
+    let mine: Vec<ShiftEvent> = events
+        .iter()
+        .filter(|event| event.shift_id() == latest)
+        .cloned()
+        .collect();
+
+    let shift = Shift::replay(&mine)?;
+    // A closed shift is not resumed. The next cashier opens their own, and the closing count of the
+    // last one is already settled history.
+    Ok((shift.status() == ShiftStatus::Open).then_some(shift))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +418,25 @@ mod tests {
             unit_price: Money::from_minor(minor, BDT),
             quantity: Quantity::ONE,
             tax_class: TaxClass::standard(1500),
+        }
+    }
+
+    fn tender(minor: i64) -> SaleEvent {
+        SaleEvent::TenderRecorded {
+            sale_id: id(SALE),
+            tender_id: id(13),
+            method: TenderMethod::Cash,
+            amount: Money::from_minor(minor, BDT),
+            reference: None,
+        }
+    }
+
+    fn completed(at: Timestamp, total: i64, change_given: i64) -> SaleEvent {
+        SaleEvent::Completed {
+            sale_id: id(SALE),
+            total: Money::from_minor(total, BDT),
+            change_given: Money::from_minor(change_given, BDT),
+            at,
         }
     }
 
@@ -423,5 +565,258 @@ mod tests {
             Terminal::load(store, identity()),
             Err(TerminalError::CorruptLog { .. })
         ));
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Shifts
+    // ------------------------------------------------------------------------------------------
+
+    const CASHIER: u128 = 0xCA51;
+    const MANAGER: u128 = 0x11A;
+    const SHIFT: u128 = 0x581F;
+
+    fn shift_opened() -> ShiftEvent {
+        ShiftEvent::Opened {
+            shift_id: id(SHIFT),
+            opened_by: id(CASHIER),
+            currency: BDT,
+            opening_float: Money::from_minor(200_000, BDT),
+            at: at(0),
+        }
+    }
+
+    #[test]
+    fn a_shift_opens_and_the_report_starts_from_the_float() {
+        let mut till = fresh();
+        till.record_shift(&shift_opened(), id(90), at(0))
+            .expect("opens");
+
+        let report = till.shift_report().expect("reports");
+        assert_eq!(report.opening_float, Money::from_minor(200_000, BDT));
+        assert_eq!(report.expected_cash, Money::from_minor(200_000, BDT));
+        assert!(!report.is_final, "an X report, not a Z");
+    }
+
+    #[test]
+    fn a_second_shift_cannot_open_over_a_running_one() {
+        // There is one physical drawer. Two open sessions would make the expected-cash figure the
+        // sum of two people's accountability, which is nobody's.
+        let mut till = fresh();
+        till.record_shift(&shift_opened(), id(90), at(0))
+            .expect("opens");
+
+        let result = till.record_shift(
+            &ShiftEvent::Opened {
+                shift_id: id(0x582F),
+                opened_by: id(MANAGER),
+                currency: BDT,
+                opening_float: Money::from_minor(100_000, BDT),
+                at: at(10),
+            },
+            id(91),
+            at(10),
+        );
+
+        assert!(matches!(result, Err(TerminalError::ShiftAlreadyOpen)));
+    }
+
+    #[test]
+    fn nothing_may_be_recorded_before_a_shift_is_open() {
+        let mut till = fresh();
+        let result = till.record_shift(
+            &ShiftEvent::Counted {
+                shift_id: id(SHIFT),
+                counted: Money::from_minor(200_000, BDT),
+                counted_by: id(CASHIER),
+                at: at(1),
+            },
+            id(90),
+            at(1),
+        );
+
+        assert!(matches!(result, Err(TerminalError::NoOpenShift)));
+    }
+
+    #[test]
+    fn cash_sales_land_in_the_expected_drawer_figure() {
+        let mut till = fresh();
+        till.record_shift(&shift_opened(), id(90), at(0))
+            .expect("opens");
+
+        till.record(&opened(), id(80), at(1)).expect("opens sale");
+        till.record(&line(50_000), id(81), at(2)).expect("adds");
+        till.record(&tender(50_000), id(82), at(3))
+            .expect("tenders");
+        till.record(&completed(at(4), 50_000, 0), id(83), at(4))
+            .expect("completes");
+
+        let report = till.shift_report().expect("reports");
+        assert_eq!(report.sale_count, 1);
+        assert_eq!(
+            report.expected_cash,
+            Money::from_minor(250_000, BDT),
+            "float plus the cash taken"
+        );
+    }
+
+    #[test]
+    fn a_skim_reduces_what_the_drawer_should_hold() {
+        let mut till = fresh();
+        till.record_shift(&shift_opened(), id(90), at(0))
+            .expect("opens");
+        till.record_shift(
+            &ShiftEvent::CashMoved {
+                shift_id: id(SHIFT),
+                movement_id: id(70),
+                amount: Money::from_minor(-100_000, BDT),
+                reason: sahl_core::shift::CashMovementReason::Skim,
+                note: None,
+                authorized_by: id(MANAGER),
+                at: at(5),
+            },
+            id(91),
+            at(5),
+        )
+        .expect("moves cash");
+
+        let report = till.shift_report().expect("reports");
+        assert_eq!(report.expected_cash, Money::from_minor(100_000, BDT));
+    }
+
+    #[test]
+    fn a_short_count_is_reported_as_short() {
+        let mut till = fresh();
+        till.record_shift(&shift_opened(), id(90), at(0))
+            .expect("opens");
+        till.record_shift(
+            &ShiftEvent::Counted {
+                shift_id: id(SHIFT),
+                counted: Money::from_minor(199_300, BDT),
+                counted_by: id(CASHIER),
+                at: at(6),
+            },
+            id(91),
+            at(6),
+        )
+        .expect("counts");
+
+        let report = till.shift_report().expect("reports");
+        assert_eq!(
+            report.variance,
+            Some(sahl_core::shift::Variance::Short {
+                by: Money::from_minor(700, BDT)
+            })
+        );
+    }
+
+    #[test]
+    fn a_restart_mid_shift_reopens_the_same_drawer() {
+        // A crash during a rush must not lose the float or the movements already recorded.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_shift(&shift_opened(), id(90), at(0))
+            .expect("opens");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.shift().map(Shift::id), Some(id(SHIFT)));
+        assert_eq!(
+            reloaded.shift_report().expect("reports").opening_float,
+            Money::from_minor(200_000, BDT)
+        );
+    }
+
+    #[test]
+    fn a_restart_after_close_does_not_reopen_the_shift() {
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_shift(&shift_opened(), id(90), at(0))
+            .expect("opens");
+        // The drawer must be counted before it can be closed — the aggregate refuses otherwise.
+        till.record_shift(
+            &ShiftEvent::Counted {
+                shift_id: id(SHIFT),
+                counted: Money::from_minor(200_000, BDT),
+                counted_by: id(CASHIER),
+                at: at(8),
+            },
+            id(93),
+            at(8),
+        )
+        .expect("counts");
+        till.record_shift(
+            &ShiftEvent::Closed {
+                shift_id: id(SHIFT),
+                closed_by: id(MANAGER),
+                closing_cash: Money::from_minor(200_000, BDT),
+                at: at(9),
+            },
+            id(91),
+            at(9),
+        )
+        .expect("closes");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert!(
+            reloaded.shift().is_none(),
+            "the next cashier opens their own"
+        );
+    }
+
+    #[test]
+    fn a_second_shift_after_a_close_loads_cleanly() {
+        // The bug this guards: replaying a week of shifts as one stream fails on the second
+        // `Opened`, and a till that will not boot mid-week is worse than one that loses a report.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_shift(&shift_opened(), id(90), at(0))
+            .expect("opens");
+        // The drawer must be counted before it can be closed — the aggregate refuses otherwise.
+        till.record_shift(
+            &ShiftEvent::Counted {
+                shift_id: id(SHIFT),
+                counted: Money::from_minor(200_000, BDT),
+                counted_by: id(CASHIER),
+                at: at(8),
+            },
+            id(93),
+            at(8),
+        )
+        .expect("counts");
+        till.record_shift(
+            &ShiftEvent::Closed {
+                shift_id: id(SHIFT),
+                closed_by: id(MANAGER),
+                closing_cash: Money::from_minor(200_000, BDT),
+                at: at(9),
+            },
+            id(91),
+            at(9),
+        )
+        .expect("closes");
+        till.record_shift(
+            &ShiftEvent::Opened {
+                shift_id: id(0x582F),
+                opened_by: id(MANAGER),
+                currency: BDT,
+                opening_float: Money::from_minor(150_000, BDT),
+                at: at(10),
+            },
+            id(92),
+            at(10),
+        )
+        .expect("opens the next one");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.shift().map(Shift::id), Some(id(0x582F)));
+        assert_eq!(
+            reloaded.shift_report().expect("reports").opening_float,
+            Money::from_minor(150_000, BDT)
+        );
     }
 }

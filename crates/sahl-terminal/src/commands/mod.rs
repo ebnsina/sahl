@@ -16,12 +16,13 @@ use sahl_core::Timestamp;
 use sahl_core::money::{Currency, Money, Rate, Rounding};
 use sahl_core::quantity::Quantity;
 use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
+use sahl_core::shift::{CashMovementReason, ShiftEvent};
 use sahl_core::tax::{Discount, PricingMode, TaxClass};
 use uuid::Uuid;
 
 use crate::terminal::{Terminal, TerminalError};
 
-pub use view::{LineView, SaleView, TaxGroupView, TenderView};
+pub use view::{LineView, SaleView, ShiftView, TaxGroupView, TenderView};
 
 /// Managed Tauri state.
 ///
@@ -69,7 +70,9 @@ impl From<TerminalError> for CommandError {
             TerminalError::TicketHeld { .. } => "ticket_held",
             TerminalError::Store(_) => "storage",
             TerminalError::Event(_) => "event",
-            TerminalError::Sale(_) => "rejected",
+            TerminalError::Sale(_) | TerminalError::Shift(_) => "rejected",
+            TerminalError::NoOpenShift => "no_open_shift",
+            TerminalError::ShiftAlreadyOpen => "shift_already_open",
         };
         Self {
             code,
@@ -429,4 +432,162 @@ pub fn till_status(state: tauri::State<'_, TerminalState>) -> Result<TillStatus,
         unsynced_count: terminal.unsynced_count()?,
         open_sales: terminal.book().open().count(),
     })
+}
+
+// -------------------------------------------------------------------------------------------
+// Shifts
+// -------------------------------------------------------------------------------------------
+
+type ShiftResult = Result<ShiftView, CommandError>;
+
+fn with_shift<F>(state: &TerminalState, act: F) -> ShiftResult
+where
+    F: FnOnce(&mut Terminal) -> Result<(), TerminalError>,
+{
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    act(&mut terminal)?;
+    Ok(ShiftView::of(&terminal.shift_report()?, Currency::Bdt))
+}
+
+/// Take the till, counting in the starting float.
+#[tauri::command]
+pub fn open_shift(
+    state: tauri::State<'_, TerminalState>,
+    cashier_id: Uuid,
+    opening_float_minor: i64,
+) -> ShiftResult {
+    with_shift(&state, |terminal| {
+        terminal
+            .record_shift(
+                &ShiftEvent::Opened {
+                    shift_id: new_id(),
+                    currency: Currency::Bdt,
+                    opened_by: cashier_id,
+                    opening_float: Money::from_minor(opening_float_minor, Currency::Bdt),
+                    at: now(),
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// Move cash in or out of the drawer outside a sale.
+///
+/// `authorized_by` is required rather than optional. Every path that takes money out of a till
+/// without a sale names someone, at the moment it happens — reconstructing it afterwards from who
+/// was rostered is exactly the reconstruction that never holds up.
+#[tauri::command]
+pub fn move_cash(
+    state: tauri::State<'_, TerminalState>,
+    amount_minor: i64,
+    reason: String,
+    note: Option<String>,
+    authorized_by: Uuid,
+) -> ShiftResult {
+    let reason = cash_reason(&reason)?;
+    with_shift(&state, |terminal| {
+        let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
+        terminal
+            .record_shift(
+                &ShiftEvent::CashMoved {
+                    shift_id,
+                    movement_id: new_id(),
+                    amount: Money::from_minor(amount_minor, Currency::Bdt),
+                    reason,
+                    note,
+                    authorized_by,
+                    at: now(),
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// Record a physical count of the drawer.
+#[tauri::command]
+pub fn count_drawer(
+    state: tauri::State<'_, TerminalState>,
+    counted_minor: i64,
+    counted_by: Uuid,
+) -> ShiftResult {
+    with_shift(&state, |terminal| {
+        let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
+        terminal
+            .record_shift(
+                &ShiftEvent::Counted {
+                    shift_id,
+                    counted: Money::from_minor(counted_minor, Currency::Bdt),
+                    counted_by,
+                    at: now(),
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// The X report: where the shift stands, without ending it.
+#[tauri::command]
+pub fn shift_report(state: tauri::State<'_, TerminalState>) -> ShiftResult {
+    with_shift(&state, |_| Ok(()))
+}
+
+/// The same figures with every expectation withheld, for a blind count.
+///
+/// A separate command rather than a flag on [`shift_report`]: a screen that receives the expected
+/// figure can leak it, and the safest way to not leak a number is to not send it.
+#[tauri::command]
+pub fn blind_count_sheet(state: tauri::State<'_, TerminalState>) -> ShiftResult {
+    with_shift(&state, |_| Ok(())).map(ShiftView::blind)
+}
+
+/// Close the till. Nothing may be added to the shift afterwards.
+#[tauri::command]
+pub fn close_shift(
+    state: tauri::State<'_, TerminalState>,
+    closed_by: Uuid,
+    closing_cash_minor: i64,
+) -> ShiftResult {
+    with_shift(&state, |terminal| {
+        let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
+        terminal
+            .record_shift(
+                &ShiftEvent::Closed {
+                    shift_id,
+                    closed_by,
+                    closing_cash: Money::from_minor(closing_cash_minor, Currency::Bdt),
+                    at: now(),
+                },
+                new_id(),
+                now(),
+            )
+            .map(|_| ())
+    })
+}
+
+/// Map the UI's reason string onto the domain enum.
+///
+/// Rejected rather than defaulted. A movement filed under the wrong reason is worse than one the
+/// till refused, because it looks settled.
+fn cash_reason(reason: &str) -> Result<CashMovementReason, CommandError> {
+    match reason {
+        "float_top_up" => Ok(CashMovementReason::FloatTopUp),
+        "skim" => Ok(CashMovementReason::Skim),
+        "petty_cash" => Ok(CashMovementReason::PettyCash),
+        "refund" => Ok(CashMovementReason::Refund),
+        "correction" => Ok(CashMovementReason::Correction),
+        other => Err(CommandError {
+            code: "unknown_reason",
+            message: format!("{other} is not a cash movement reason"),
+        }),
+    }
 }
