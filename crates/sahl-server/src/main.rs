@@ -18,7 +18,11 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Logs to stderr, data to stdout. The token-issuing subcommands print a credential nobody can
+    // recover later, and a log line interleaved into that output makes it unscriptable — which is
+    // how a token gets pasted with a timestamp glued to the front of it.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
@@ -51,6 +55,7 @@ async fn run() -> Result<(), String> {
         }
         Some("issue-token") => return issue_token(&pool).await,
         Some("add-staff") => return add_staff(&pool).await,
+        Some("issue-dashboard-token") => return issue_dashboard_token(&pool).await,
         _ => {}
     }
 
@@ -115,12 +120,19 @@ async fn issue_token(pool: &sqlx::PgPool) -> Result<(), String> {
 
     // The outlet's tenant has to be read before the transaction can be scoped, and the device
     // lookup already solves exactly this problem for enrollment.
-    let tenant: (uuid::Uuid,) = sqlx::query_as("SELECT tenant_id FROM outlet WHERE id = $1")
-        .bind(outlet)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| format!("could not read the outlet: {error}"))?
-        .ok_or_else(|| format!("no outlet {outlet}"))?;
+    // Through the lookup function, not a plain SELECT. Row-level security is FORCEd on `outlet`,
+    // and nothing has scoped this connection to a tenant yet — the tenant is what is being looked
+    // up. A direct read returns no rows as the runtime role and every row as a superuser, so it
+    // would have worked in development and failed in production.
+    let tenant: (uuid::Uuid,) = {
+        let found: (Option<uuid::Uuid>,) = sqlx::query_as("SELECT outlet_tenant($1)")
+            .bind(outlet)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("could not read the outlet: {error}"))?
+            .ok_or_else(|| format!("no outlet {outlet}"))?;
+        (found.0.ok_or_else(|| format!("no outlet {outlet}"))?,)
+    };
 
     let minted = sahl_server::device::mint_token()
         .map_err(|error| format!("could not mint a token: {error}"))?;
@@ -155,6 +167,85 @@ async fn issue_token(pool: &sqlx::PgPool) -> Result<(), String> {
     // database holds a digest, so a lost token is reissued rather than recovered.
     println!("{}", minted.plaintext);
     eprintln!("valid for {ttl_seconds}s, single use, for outlet {outlet}");
+    Ok(())
+}
+
+/// Mint a long-lived token an owner uses to read their shop from a phone.
+///
+/// Not their till PIN: four digits on a public endpoint is guessable, and the only thing that made
+/// a PIN reasonable was that guessing it required standing at the counter.
+///
+/// Usage: `sahl-server issue-dashboard-token <outlet-id|tenant:TENANT-ID> <label>`
+async fn issue_dashboard_token(pool: &sqlx::PgPool) -> Result<(), String> {
+    const USAGE: &str =
+        "usage: sahl-server issue-dashboard-token <outlet-id|tenant:TENANT-ID> <label>";
+
+    let scope = std::env::args().nth(2).ok_or(USAGE)?;
+    let label = std::env::args().nth(3).ok_or(USAGE)?;
+    if label.trim().is_empty() {
+        return Err("a token needs a label, so the right one can be revoked later".to_owned());
+    }
+
+    // Tenant-wide is spelled differently on purpose. A token that reads every outlet in a chain is
+    // a bigger thing to hand out than one that reads a single shop, and it should not be one
+    // mistyped argument away.
+    let (tenant, outlet) = if let Some(raw) = scope.strip_prefix("tenant:") {
+        let tenant: uuid::Uuid = raw
+            .parse()
+            .map_err(|_| "tenant id must be a UUID".to_owned())?;
+        (tenant, None)
+    } else {
+        let outlet: uuid::Uuid = scope
+            .parse()
+            .map_err(|_| "outlet id must be a UUID".to_owned())?;
+        let found: (Option<uuid::Uuid>,) = sqlx::query_as("SELECT outlet_tenant($1)")
+            .bind(outlet)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("could not read the outlet: {error}"))?
+            .ok_or_else(|| format!("no outlet {outlet}"))?;
+        (
+            found.0.ok_or_else(|| format!("no outlet {outlet}"))?,
+            Some(outlet),
+        )
+    };
+
+    let minted = sahl_server::device::mint_token()
+        .map_err(|error| format!("could not mint a token: {error}"))?;
+
+    let mut transaction = db::begin_for_tenant(pool, tenant)
+        .await
+        .map_err(|error| format!("could not open a transaction: {error}"))?;
+
+    sqlx::query(
+        "INSERT INTO dashboard_token (id, tenant_id, outlet_id, label, token_hash) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(tenant)
+    .bind(outlet)
+    .bind(label.trim())
+    .bind(minted.digest.as_slice())
+    .execute(
+        sqlx::Acquire::acquire(&mut transaction)
+            .await
+            .map_err(|error| format!("could not acquire a connection: {error}"))?,
+    )
+    .await
+    .map_err(|error| format!("could not store the token: {error}"))?;
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| format!("could not commit: {error}"))?;
+
+    // stdout, never the log. This is the only moment the plaintext exists — the database holds a
+    // digest, so a lost token is reissued rather than recovered.
+    println!("{}", minted.plaintext);
+    match outlet {
+        Some(id) => eprintln!("reads outlet {id}, revoke by label {label:?}"),
+        None => eprintln!("reads EVERY outlet in tenant {tenant}, revoke by label {label:?}"),
+    }
     Ok(())
 }
 
@@ -195,12 +286,19 @@ async fn add_staff(pool: &sqlx::PgPool) -> Result<(), String> {
     let salt = SaltString::generate(&mut OsRng);
     let pin_hash = pin::hash(&secret, &salt).map_err(|error| error.to_string())?;
 
-    let tenant: (uuid::Uuid,) = sqlx::query_as("SELECT tenant_id FROM outlet WHERE id = $1")
-        .bind(outlet)
-        .fetch_optional(pool)
-        .await
-        .map_err(|error| format!("could not read the outlet: {error}"))?
-        .ok_or_else(|| format!("no outlet {outlet}"))?;
+    // Through the lookup function, not a plain SELECT. Row-level security is FORCEd on `outlet`,
+    // and nothing has scoped this connection to a tenant yet — the tenant is what is being looked
+    // up. A direct read returns no rows as the runtime role and every row as a superuser, so it
+    // would have worked in development and failed in production.
+    let tenant: (uuid::Uuid,) = {
+        let found: (Option<uuid::Uuid>,) = sqlx::query_as("SELECT outlet_tenant($1)")
+            .bind(outlet)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| format!("could not read the outlet: {error}"))?
+            .ok_or_else(|| format!("no outlet {outlet}"))?;
+        (found.0.ok_or_else(|| format!("no outlet {outlet}"))?,)
+    };
 
     // An owner is tenant-wide; a manager or cashier belongs to the outlet they were created for.
     let scope = (!matches!(role, Role::Owner)).then_some(outlet);

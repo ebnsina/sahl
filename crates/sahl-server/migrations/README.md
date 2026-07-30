@@ -26,7 +26,7 @@ a superuser, before first deploy:
 ```sql
 CREATE ROLE sahl_app LOGIN PASSWORD '...' NOSUPERUSER NOBYPASSRLS;
 
-GRANT SELECT, INSERT, UPDATE ON tenant, outlet, app_user, device, enrollment_token TO sahl_app;
+GRANT SELECT, INSERT, UPDATE ON tenant, outlet, app_user, device, enrollment_token, dashboard_token TO sahl_app;
 
 -- The event log is append-only. No UPDATE or DELETE grant is issued, and a trigger blocks both
 -- even if one is granted by mistake — verified, not assumed.
@@ -39,6 +39,13 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sahl_app;
 -- explicitly. Without it every signed request fails authentication with an opaque 401.
 GRANT EXECUTE ON FUNCTION device_tenant(UUID) TO sahl_app;
 GRANT EXECUTE ON FUNCTION enrollment_token_for_digest(BYTEA) TO sahl_app;
+GRANT EXECUTE ON FUNCTION dashboard_token_for_digest(BYTEA) TO sahl_app;
+GRANT EXECUTE ON FUNCTION outlet_tenant(UUID) TO sahl_app;
+
+-- Startup verifies the schema is current before it serves, and it does that as the runtime role.
+-- Without this the server refuses to boot with "could not read migration state", which reads like
+-- a database outage rather than a missing grant.
+GRANT SELECT ON _sqlx_migrations TO sahl_app;
 ```
 
 Migrations themselves need DDL rights, so run them as the owning role and let the server connect as

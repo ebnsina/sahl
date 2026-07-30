@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod enroll;
+pub mod reports;
 pub mod sync;
 
 use axum::Router;
@@ -22,5 +23,7 @@ pub fn router(state: AppState) -> Router {
         .route(enroll::ENROLL_PATH, post(enroll::enroll))
         .route(sync::PUSH_PATH, post(sync::push))
         .route(sync::PULL_PATH, get(sync::pull))
+        .route(reports::DAY_PATH, get(reports::day))
+        .route(reports::OUTLETS_PATH, get(reports::outlets))
         .with_state(state)
 }
