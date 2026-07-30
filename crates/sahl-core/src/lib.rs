@@ -32,6 +32,7 @@ pub mod catalogue;
 pub mod event;
 pub mod floor;
 pub mod inventory;
+pub mod kitchen;
 pub mod ledger;
 pub mod money;
 pub mod outlet;

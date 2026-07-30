@@ -134,6 +134,22 @@ pub enum SaleEvent {
         seated_by: Uuid,
     },
 
+    /// Lines were sent to a prep station.
+    ///
+    /// Recorded, not merely printed. Without it a second press of "send" reprints the whole order
+    /// and the kitchen makes it twice — which is the single most expensive mistake a café POS can
+    /// make, because the food is gone before anyone notices.
+    ///
+    /// Café only: `Capability::KitchenRouting`.
+    LinesFired {
+        sale_id: Uuid,
+        line_ids: Vec<Uuid>,
+        /// Which round. A cook reading "2" knows the first is already out.
+        round: u32,
+        at: Timestamp,
+        fired_by: Uuid,
+    },
+
     /// The ticket is dropped without payment — a walkout, or a cart abandoned at close.
     ///
     /// Recorded rather than deleted: an abandoned ticket full of scanned goods is itself a signal
@@ -155,6 +171,7 @@ impl SaleEvent {
             | Self::TicketClaimed { sale_id, .. }
             | Self::TicketReleased { sale_id, .. }
             | Self::Seated { sale_id, .. }
+            | Self::LinesFired { sale_id, .. }
             | Self::TenderRecorded { sale_id, .. }
             | Self::Completed { sale_id, .. }
             | Self::Abandoned { sale_id, .. } => *sale_id,
@@ -174,6 +191,7 @@ impl EventPayload for SaleEvent {
             Self::TicketClaimed { .. } => "sale.ticket_claimed",
             Self::TicketReleased { .. } => "sale.ticket_released",
             Self::Seated { .. } => "sale.seated",
+            Self::LinesFired { .. } => "sale.lines_fired",
             Self::TenderRecorded { .. } => "sale.tender_recorded",
             Self::Completed { .. } => "sale.completed",
             Self::Abandoned { .. } => "sale.abandoned",

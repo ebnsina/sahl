@@ -132,6 +132,10 @@ pub struct Product {
     pub tax_class: TaxClass,
     /// Grouping for reports and for the sell screen's layout.
     pub category: Option<String>,
+    /// Where this is made, for a café. `None` means it needs no preparation — a bottled drink
+    /// taken off a shelf never reaches a station.
+    #[serde(default)]
+    pub station: Option<crate::kitchen::Station>,
     /// Choices offered when this is rung — size, milk, extras.
     ///
     /// `default` so products saved before options existed still deserialize.
@@ -181,6 +185,7 @@ mod tests {
             unit: Unit::Piece,
             tax_class: TaxClass::standard(1500),
             category: Some("Staples".to_owned()),
+            station: None,
             option_groups: Vec::new(),
             active: true,
         }

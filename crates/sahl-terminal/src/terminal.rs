@@ -855,6 +855,64 @@ impl Terminal {
         Ok(())
     }
 
+    /// What each station has not yet been told about this ticket.
+    ///
+    /// Reads the sale's own record of what was fired, so pressing "send" twice sends only what is
+    /// new. Without that a second press reprints the whole order and the kitchen makes it twice —
+    /// which, unlike almost every other POS mistake, cannot be corrected: the food is already
+    /// cooked.
+    ///
+    /// # Errors
+    /// [`TerminalError::UnknownSale`] if there is no such sale.
+    pub fn pending_kitchen(
+        &self,
+        sale_id: Uuid,
+    ) -> Result<Vec<sahl_core::kitchen::KitchenTicket>, TerminalError> {
+        let sale = self.sale(sale_id)?;
+        let table = sale
+            .seating()
+            .and_then(|seating| self.floor.get(seating.table_id))
+            .map(|table| table.label.clone());
+
+        let round = sale.rounds_fired().saturating_add(1);
+        let station_of = |product_id: Uuid| {
+            self.catalogue
+                .get(product_id)
+                .and_then(|product| product.station)
+        };
+
+        let mut tickets = sahl_core::kitchen::pending(
+            sale,
+            sale.fired(),
+            round,
+            self.now_for_kitchen(),
+            table.clone(),
+            station_of,
+        );
+        tickets.extend(sahl_core::kitchen::cancellations(
+            sale,
+            sale.fired(),
+            round,
+            self.now_for_kitchen(),
+            table,
+            station_of,
+        ));
+        Ok(tickets)
+    }
+
+    /// The clock the kitchen tickets are stamped with.
+    ///
+    /// Taken from the last event rather than the wall clock, so `pending_kitchen` is a pure function
+    /// of the log — two devices asked the same question get the same answer, and a test does not
+    /// have to freeze time.
+    fn now_for_kitchen(&self) -> Timestamp {
+        self.book
+            .iter()
+            .filter_map(|sale| sale.settled_at())
+            .max()
+            .unwrap_or(Timestamp::EPOCH)
+    }
+
     /// Turn chosen option ids into the modifiers a line carries.
     ///
     /// Validated here rather than trusted from the caller. The UI knows which buttons it drew, but
@@ -2734,6 +2792,7 @@ mod tests {
             unit,
             tax_class: TaxClass::standard(1500),
             category: Some("Staples".to_owned()),
+            station: None,
             option_groups: Vec::new(),
         }
     }
@@ -3097,6 +3156,7 @@ mod tests {
                 unit: sahl_core::catalogue::Unit::Piece,
                 tax_class: TaxClass::standard(1500),
                 category: Some("Drinks".to_owned()),
+                station: None,
                 option_groups: vec![
                     ModifierGroup {
                         id: id(100),
@@ -3380,5 +3440,285 @@ mod tests {
         let parts =
             sahl_core::sale::by_lines(&active, &line_totals, &[vec![id(12)]]).expect("splits");
         assert_eq!(parts[0].amount, totals.total);
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The kitchen
+    // ------------------------------------------------------------------------------------------
+
+    fn dish(
+        product: u128,
+        name: &str,
+        station: Option<sahl_core::kitchen::Station>,
+    ) -> sahl_core::catalogue::CatalogueEvent {
+        sahl_core::catalogue::CatalogueEvent::ProductAdded {
+            product_id: id(product),
+            details: sahl_core::catalogue::ProductDetails {
+                name: name.to_owned(),
+                sku: None,
+                barcodes: Vec::new(),
+                price: Money::from_minor(30_000, BDT),
+                unit: sahl_core::catalogue::Unit::Piece,
+                tax_class: TaxClass::standard(1500),
+                category: Some("Food".to_owned()),
+                station,
+                option_groups: Vec::new(),
+            },
+            at: at(0),
+            added_by: id(0x0E),
+        }
+    }
+
+    fn kitchen_order() -> Terminal {
+        use sahl_core::kitchen::Station;
+        let mut till = fresh();
+        till.record_catalogue(&dish(20, "Curry", Some(Station::Kitchen)), id(60), at(0))
+            .expect("adds");
+        till.record_catalogue(&dish(21, "Lime soda", Some(Station::Bar)), id(61), at(0))
+            .expect("adds");
+
+        till.record(&opened(), id(80), at(1)).expect("opens");
+        for (line_id, product, name) in [(0x11_u128, 20_u128, "Curry"), (0x12, 21, "Lime soda")] {
+            till.record(
+                &SaleEvent::LineAdded {
+                    sale_id: id(SALE),
+                    line_id: id(line_id),
+                    product_id: id(product),
+                    name: name.to_owned(),
+                    unit_price: Money::from_minor(30_000, BDT),
+                    quantity: Quantity::ONE,
+                    tax_class: TaxClass::standard(1500),
+                    modifiers: Vec::new(),
+                },
+                id(line_id + 0x100),
+                at(2),
+            )
+            .expect("adds");
+        }
+        till
+    }
+
+    #[test]
+    fn an_order_routes_to_the_station_that_makes_it() {
+        let till = kitchen_order();
+        let tickets = till.pending_kitchen(id(SALE)).expect("pending");
+
+        assert_eq!(tickets.len(), 2);
+        assert!(tickets.iter().any(|ticket| ticket.station
+            == sahl_core::kitchen::Station::Kitchen
+            && ticket.lines[0].name == "Curry"));
+        assert!(
+            tickets
+                .iter()
+                .any(|ticket| ticket.station == sahl_core::kitchen::Station::Bar
+                    && ticket.lines[0].name == "Lime soda")
+        );
+    }
+
+    #[test]
+    fn firing_twice_sends_nothing_the_second_time() {
+        // The expensive mistake: a second press that reprints the whole order gets the food made
+        // twice, and unlike almost anything else a POS gets wrong, that cannot be undone.
+        let mut till = kitchen_order();
+        let first = till.pending_kitchen(id(SALE)).expect("pending");
+        assert_eq!(first.len(), 2);
+
+        till.record(
+            &SaleEvent::LinesFired {
+                sale_id: id(SALE),
+                line_ids: vec![id(0x11), id(0x12)],
+                round: 1,
+                at: at(3),
+                fired_by: id(CASHIER),
+            },
+            id(90),
+            at(3),
+        )
+        .expect("fires");
+
+        assert!(
+            till.pending_kitchen(id(SALE)).expect("pending").is_empty(),
+            "nothing new to send"
+        );
+    }
+
+    #[test]
+    fn a_later_course_sends_only_what_is_new() {
+        let mut till = kitchen_order();
+        till.record(
+            &SaleEvent::LinesFired {
+                sale_id: id(SALE),
+                line_ids: vec![id(0x11), id(0x12)],
+                round: 1,
+                at: at(3),
+                fired_by: id(CASHIER),
+            },
+            id(90),
+            at(3),
+        )
+        .expect("fires");
+
+        till.record(
+            &SaleEvent::LineAdded {
+                sale_id: id(SALE),
+                line_id: id(0x13),
+                product_id: id(20),
+                name: "Naan".to_owned(),
+                unit_price: Money::from_minor(8_000, BDT),
+                quantity: Quantity::ONE,
+                tax_class: TaxClass::standard(1500),
+                modifiers: Vec::new(),
+            },
+            id(91),
+            at(4),
+        )
+        .expect("adds");
+
+        let tickets = till.pending_kitchen(id(SALE)).expect("pending");
+        assert_eq!(tickets.len(), 1, "only the kitchen has something new");
+        assert_eq!(tickets[0].lines.len(), 1);
+        assert_eq!(tickets[0].lines[0].name, "Naan");
+        assert_eq!(tickets[0].round, 2, "and the cook knows round one is out");
+    }
+
+    #[test]
+    fn voiding_a_line_the_kitchen_already_has_produces_a_cancellation() {
+        let mut till = kitchen_order();
+        till.record(
+            &SaleEvent::LinesFired {
+                sale_id: id(SALE),
+                line_ids: vec![id(0x11), id(0x12)],
+                round: 1,
+                at: at(3),
+                fired_by: id(CASHIER),
+            },
+            id(90),
+            at(3),
+        )
+        .expect("fires");
+        till.record(
+            &SaleEvent::LineVoided {
+                sale_id: id(SALE),
+                line_id: id(0x11),
+                reason: sahl_core::sale::VoidReason::CustomerChanged,
+                authorized_by: id(MANAGER),
+            },
+            id(91),
+            at(4),
+        )
+        .expect("voids");
+
+        let tickets = till.pending_kitchen(id(SALE)).expect("pending");
+        assert_eq!(tickets.len(), 1);
+        assert_eq!(
+            tickets[0].kind,
+            sahl_core::kitchen::TicketKind::Cancellation
+        );
+        assert_eq!(tickets[0].station, sahl_core::kitchen::Station::Kitchen);
+    }
+
+    #[test]
+    fn voiding_a_line_nobody_started_produces_nothing() {
+        // Printing one would have a cook looking for an order they never received.
+        let mut till = kitchen_order();
+        till.record(
+            &SaleEvent::LineVoided {
+                sale_id: id(SALE),
+                line_id: id(0x11),
+                reason: sahl_core::sale::VoidReason::Mistake,
+                authorized_by: id(MANAGER),
+            },
+            id(90),
+            at(3),
+        )
+        .expect("voids");
+
+        let tickets = till.pending_kitchen(id(SALE)).expect("pending");
+        assert!(
+            tickets
+                .iter()
+                .all(|ticket| ticket.kind == sahl_core::kitchen::TicketKind::Order),
+            "no cancellation for something never sent"
+        );
+    }
+
+    #[test]
+    fn a_retail_product_with_no_station_still_reaches_one() {
+        // A ticket at the wrong station is recoverable; a ticket that never printed is a table
+        // waiting on nothing.
+        let mut till = fresh();
+        till.record_catalogue(&dish(20, "Rice", None), id(60), at(0))
+            .expect("adds");
+        till.record(&opened(), id(80), at(1)).expect("opens");
+        till.record(
+            &SaleEvent::LineAdded {
+                sale_id: id(SALE),
+                line_id: id(0x11),
+                product_id: id(20),
+                name: "Rice".to_owned(),
+                unit_price: Money::from_minor(30_000, BDT),
+                quantity: Quantity::ONE,
+                tax_class: TaxClass::standard(1500),
+                modifiers: Vec::new(),
+            },
+            id(81),
+            at(2),
+        )
+        .expect("adds");
+
+        let tickets = till.pending_kitchen(id(SALE)).expect("pending");
+        assert_eq!(tickets[0].station, sahl_core::kitchen::Station::Kitchen);
+    }
+
+    #[test]
+    fn the_firing_record_survives_a_restart() {
+        // If it did not, every restart would re-send every open table's whole order.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_catalogue(
+            &dish(20, "Curry", Some(sahl_core::kitchen::Station::Kitchen)),
+            id(60),
+            at(0),
+        )
+        .expect("adds");
+        till.record(&opened(), id(80), at(1)).expect("opens");
+        till.record(
+            &SaleEvent::LineAdded {
+                sale_id: id(SALE),
+                line_id: id(0x11),
+                product_id: id(20),
+                name: "Curry".to_owned(),
+                unit_price: Money::from_minor(30_000, BDT),
+                quantity: Quantity::ONE,
+                tax_class: TaxClass::standard(1500),
+                modifiers: Vec::new(),
+            },
+            id(81),
+            at(2),
+        )
+        .expect("adds");
+        till.record(
+            &SaleEvent::LinesFired {
+                sale_id: id(SALE),
+                line_ids: vec![id(0x11)],
+                round: 1,
+                at: at(3),
+                fired_by: id(CASHIER),
+            },
+            id(82),
+            at(3),
+        )
+        .expect("fires");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert!(
+            reloaded
+                .pending_kitchen(id(SALE))
+                .expect("pending")
+                .is_empty(),
+            "a restart must not re-send an order the kitchen already has"
+        );
     }
 }

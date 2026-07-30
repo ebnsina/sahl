@@ -65,6 +65,73 @@ impl Document {
         self.bytes
     }
 
+    /// Render a kitchen ticket.
+    ///
+    /// No drawer pulse and no prices. A prep station has no till, and an amount on a ticket is a
+    /// number somebody will eventually read as a quantity.
+    #[must_use]
+    pub fn render_kitchen(data: &KitchenTicketData, paper: PaperWidth) -> Self {
+        let width = paper.columns();
+        let mut out = command::initialize();
+        out.extend(command::code_page(command::CODE_PAGE_CP437));
+
+        out.extend(command::align(Align::Center));
+        out.extend(command::emphasis(true));
+        out.extend(command::size(true, true));
+
+        // A cancellation is marked before anything else on the ticket, because the whole meaning of
+        // what follows inverts and a cook reading it late has already started cooking.
+        if data.is_cancellation {
+            out.extend(line("*** CANCEL ***"));
+        }
+        out.extend(line(&data.station));
+        out.extend(command::size(false, false));
+
+        if let Some(table) = &data.table_label {
+            out.extend(command::size(true, true));
+            out.extend(line(&format!("TABLE {table}")));
+            out.extend(command::size(false, false));
+        }
+
+        out.extend(command::emphasis(false));
+        out.extend(command::align(Align::Left));
+        out.extend(line(&rule(width, '=')));
+
+        let mut header = format!("Round {}", data.round);
+        if let Some(covers) = data.covers {
+            // ASCII only. The code page is CP437 and a multi-byte character sent to it prints as
+            // whatever those bytes happen to mean there — see the note at the top of the crate.
+            header.push_str(&format!("   {covers} covers"));
+        }
+        out.extend(line(&header));
+        out.extend(line(&data.printed_at));
+        out.extend(line(&rule(width, '=')));
+
+        for item in &data.lines {
+            out.extend(command::emphasis(true));
+            out.extend(command::size(false, true));
+            out.extend(line(&format!(
+                "{} x {}",
+                quantity_label(item.quantity),
+                item.name
+            )));
+            out.extend(command::size(false, false));
+            out.extend(command::emphasis(false));
+
+            // Indented on their own lines rather than inline: an option appended to a dish name
+            // wraps into the next item on a 32-column roll and reads as part of it.
+            for modifier in &item.modifiers {
+                out.extend(line(&format!("    - {modifier}")));
+            }
+        }
+
+        out.extend(line(&rule(width, '=')));
+        out.extend(command::feed(3));
+        out.extend(command::cut());
+
+        Self { bytes: out }
+    }
+
     /// Render a receipt. `open_drawer` appends the pulse so the drawer opens as the paper prints.
     #[must_use]
     pub fn render(data: &ReceiptData, paper: PaperWidth, open_drawer: bool) -> Self {
@@ -187,6 +254,19 @@ impl Document {
 /// A line of text plus a newline.
 ///
 /// Non-ASCII becomes '?': visible and diagnosable, unlike CP437's garbage boxes.
+/// A quantity as a cook reads it: "2", not "2.000".
+fn quantity_label(quantity: Quantity) -> String {
+    let milli = quantity.milli();
+    if milli % Quantity::MILLI_PER_UNIT == 0 {
+        return (milli / Quantity::MILLI_PER_UNIT).to_string();
+    }
+    let whole = milli / Quantity::MILLI_PER_UNIT;
+    let fraction = (milli % Quantity::MILLI_PER_UNIT).abs();
+    format!("{whole}.{fraction:03}")
+        .trim_end_matches('0')
+        .to_owned()
+}
+
 fn line(text: &str) -> Vec<u8> {
     let mut out: Vec<u8> = text
         .chars()
@@ -373,5 +453,195 @@ mod tests {
         let narrow = Document::render(&sample(), PaperWidth::Mm58, false);
         let wide = Document::render(&sample(), PaperWidth::Mm80, false);
         assert!(wide.bytes().len() > narrow.bytes().len());
+    }
+}
+
+/// One station's instruction, as it prints.
+///
+/// Deliberately not a receipt. A kitchen ticket carries **no prices** — a number beside an item is a
+/// number somebody will eventually mistake for a quantity — and it is set large, because it is read
+/// across a hot room at a glance rather than held and studied.
+#[derive(Debug, Clone)]
+pub struct KitchenTicketData {
+    /// "KITCHEN", "BAR". Shouted, because it is the first thing read.
+    pub station: String,
+    /// True when this cancels rather than orders. The two must never be confused: a cancellation
+    /// read as an order gets the dish made twice.
+    pub is_cancellation: bool,
+    pub table_label: Option<String>,
+    pub covers: Option<u32>,
+    /// Which round. A cook reading "2" knows the first is already out.
+    pub round: u32,
+    /// Pre-formatted by the caller, like every other time on a printed document.
+    pub printed_at: String,
+    pub lines: Vec<KitchenTicketLine>,
+}
+
+/// One line on a kitchen ticket.
+#[derive(Debug, Clone)]
+pub struct KitchenTicketLine {
+    pub name: String,
+    pub quantity: Quantity,
+    /// The options. On a kitchen ticket these matter more than the dish name — "no nuts" is the
+    /// part that hurts somebody if it is dropped — so they print indented under it, never inline.
+    pub modifiers: Vec<String>,
+}
+
+#[cfg(test)]
+mod kitchen_tests {
+    use super::*;
+
+    fn readable(bytes: &[u8]) -> String {
+        // Consume whole ESC/POS sequences rather than blanking control bytes: `ESC a 1` would
+        // otherwise leave a stray "a 1" that reads as text nobody printed.
+        let mut out = String::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            let skip = match (byte, bytes.get(index + 1)) {
+                (0x1B, Some(b'@')) => 2,
+                (0x1B, Some(b'a' | b'E' | b'd' | b't')) => 3,
+                (0x1B, Some(b'p')) => 5,
+                (0x1D, Some(b'!')) => 3,
+                (0x1D, Some(b'V')) => 4,
+                _ => 0,
+            };
+            if skip > 0 {
+                index += skip;
+                continue;
+            }
+            if byte == b'\n' || !byte.is_ascii_control() {
+                out.push(byte as char);
+            }
+            index += 1;
+        }
+        out
+    }
+
+    fn ticket(is_cancellation: bool) -> KitchenTicketData {
+        KitchenTicketData {
+            station: "KITCHEN".to_owned(),
+            is_cancellation,
+            table_label: Some("12".to_owned()),
+            covers: Some(4),
+            round: 2,
+            printed_at: "30 Jul 2026, 19:42".to_owned(),
+            lines: vec![
+                KitchenTicketLine {
+                    name: "Chicken curry".to_owned(),
+                    quantity: Quantity::from_milli(2_000),
+                    modifiers: vec!["No nuts".to_owned(), "Extra hot".to_owned()],
+                },
+                KitchenTicketLine {
+                    name: "Naan".to_owned(),
+                    quantity: Quantity::ONE,
+                    modifiers: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_kitchen_ticket_carries_no_prices() {
+        // An amount beside an item is a number somebody eventually reads as a quantity.
+        let text = readable(Document::render_kitchen(&ticket(false), PaperWidth::Mm80).bytes());
+        assert!(!text.contains('.'), "no decimal amounts: {text}");
+        assert!(!text.to_lowercase().contains("total"));
+    }
+
+    #[test]
+    fn the_table_and_round_are_on_it() {
+        let text = readable(Document::render_kitchen(&ticket(false), PaperWidth::Mm80).bytes());
+        assert!(text.contains("TABLE 12"));
+        assert!(text.contains("Round 2"), "a cook knows the first is out");
+        assert!(text.contains("4 covers"));
+    }
+
+    #[test]
+    fn options_print_under_their_line_not_beside_it() {
+        // Appended to a dish name they wrap into the next item on a narrow roll and read as part
+        // of it — which is how "no nuts" ends up against the wrong dish.
+        let text = readable(Document::render_kitchen(&ticket(false), PaperWidth::Mm58).bytes());
+        assert!(text.contains("    - No nuts"));
+        assert!(text.contains("    - Extra hot"));
+    }
+
+    #[test]
+    fn a_cancellation_says_so_before_anything_else() {
+        // The meaning of everything after it inverts, and a cook reading it late has already
+        // started cooking.
+        let text = readable(Document::render_kitchen(&ticket(true), PaperWidth::Mm80).bytes());
+        let cancel = text.find("CANCEL").expect("marked");
+        let station = text.find("KITCHEN").expect("station");
+        assert!(cancel < station, "the marker comes first:\n{text}");
+    }
+
+    #[test]
+    fn an_order_ticket_is_not_marked_as_a_cancellation() {
+        let text = readable(Document::render_kitchen(&ticket(false), PaperWidth::Mm80).bytes());
+        assert!(!text.contains("CANCEL"));
+    }
+
+    #[test]
+    fn a_whole_quantity_prints_whole() {
+        // "2.000 x Naan" is a quantity a cook has to parse. "2 x Naan" is one they read.
+        let text = readable(Document::render_kitchen(&ticket(false), PaperWidth::Mm80).bytes());
+        assert!(text.contains("2 x Chicken curry"), "{text}");
+        assert!(text.contains("1 x Naan"));
+    }
+
+    #[test]
+    fn every_line_fits_the_narrow_roll() {
+        let text = readable(Document::render_kitchen(&ticket(false), PaperWidth::Mm58).bytes());
+        for line in text.lines() {
+            assert!(line.chars().count() <= 32, "too wide: {line:?}");
+        }
+    }
+
+    /// Print one for a human to read. Layout is the one thing only eyes check.
+    #[test]
+    #[ignore = "prints a ticket to look at; run with --ignored"]
+    fn dump_for_eyeballing() {
+        for paper in [PaperWidth::Mm58, PaperWidth::Mm80] {
+            println!("\n===== {paper:?} order =====");
+            println!(
+                "{}",
+                readable(Document::render_kitchen(&ticket(false), paper).bytes())
+            );
+        }
+        println!("\n===== cancellation =====");
+        println!(
+            "{}",
+            readable(Document::render_kitchen(&ticket(true), PaperWidth::Mm58).bytes())
+        );
+    }
+
+    #[test]
+    fn nothing_printable_leaves_the_ascii_range() {
+        // The code page is set to CP437, so a multi-byte character prints as whatever its bytes
+        // happen to mean there. This caught a middle dot in the covers line that rendered as "?".
+        // It does not cover Bangla or Arabic, which cannot be sent as characters at all and need
+        // the raster path — see the crate note.
+        for cancellation in [false, true] {
+            for paper in [PaperWidth::Mm58, PaperWidth::Mm80] {
+                let bytes = Document::render_kitchen(&ticket(cancellation), paper).into_bytes();
+                assert!(
+                    bytes.iter().all(u8::is_ascii),
+                    "a non-ASCII byte reached the printer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_job_is_cut_and_has_no_drawer_pulse() {
+        // A prep station has no till, and a drawer that opens in a kitchen is a drawer nobody is
+        // watching.
+        let bytes = Document::render_kitchen(&ticket(false), PaperWidth::Mm80).into_bytes();
+        assert!(bytes.windows(2).any(|pair| pair == [0x1D, b'V']), "cut");
+        assert!(
+            !bytes.windows(2).any(|pair| pair == [0x1B, b'p']),
+            "no pulse"
+        );
     }
 }

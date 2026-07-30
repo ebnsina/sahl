@@ -75,6 +75,7 @@
 	let treatment = $state<TaxTreatment>('standard');
 	let rate = $state('1500');
 	let category = $state('');
+	let station = $state('');
 	/** Option groups being edited. Ids are null for anything newly added; the till mints them. */
 	let groups = $state<
 		Array<{
@@ -138,6 +139,7 @@
 		treatment = 'standard';
 		rate = '1500';
 		category = '';
+		station = '';
 		groups = [];
 		showForm = true;
 	}
@@ -154,6 +156,7 @@
 		treatment = product.taxTreatment;
 		rate = String(product.taxBasisPoints || 1500);
 		category = product.category ?? '';
+		station = product.station ?? '';
 		groups = product.optionGroups.map((group) => ({
 			id: group.id,
 			name: group.name,
@@ -225,6 +228,7 @@
 					taxBasisPoints: treatment === 'standard' ? Number(rate) : 0,
 					taxTreatment: treatment,
 					category: category.trim() || null,
+					station: station || null,
 					pin
 				});
 				pendingSave = false;
@@ -460,6 +464,27 @@
 							<Field id="product-category" label="Category" hint="Optional.">
 								{#snippet children({ id, describedBy })}
 									<Input {id} {describedBy} bind:value={category} placeholder="Staples" />
+								{/snippet}
+							</Field>
+
+							<Field
+								id="product-station"
+								label="Made at"
+								hint="Café only. Nothing means it needs no preparation."
+							>
+								{#snippet children({ id, describedBy })}
+									<Select
+										{id}
+										{describedBy}
+										bind:value={station}
+										options={[
+											{ value: '', label: 'No preparation' },
+											{ value: 'kitchen', label: 'Kitchen' },
+											{ value: 'bar', label: 'Bar' },
+											{ value: 'counter', label: 'Counter' },
+											{ value: 'pass', label: 'Pass' }
+										]}
+									/>
 								{/snippet}
 							</Field>
 

@@ -19,6 +19,7 @@ use sahl_core::Timestamp;
 use sahl_core::catalogue::{CatalogueEvent, ModifierGroup, ProductDetails, Unit};
 use sahl_core::floor::{FloorEvent, TableDetails};
 use sahl_core::inventory::{InventoryEvent, IssueReason};
+use sahl_core::kitchen::Station;
 use sahl_core::money::{Currency, Money, Rate, Rounding};
 use sahl_core::outlet::{FiscalRegime, OutletEvent, OutletSettings, Profile};
 use sahl_core::purchasing::{CloseReason, OrderLine, PurchaseEvent};
@@ -27,7 +28,10 @@ use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
 use sahl_core::shift::{CashMovementReason, ShiftEvent};
 use sahl_core::staff::{Permission, Role, StaffEvent, pin as staff_pin};
 use sahl_core::tax::{Discount, PricingMode, TaxClass};
-use sahl_escpos::{Document as EscposDocument, PaperWidth};
+use sahl_escpos::{
+    Document as EscposDocument, KitchenTicketData as EscposKitchenTicket,
+    KitchenTicketLine as EscposKitchenLine, PaperWidth,
+};
 use uuid::Uuid;
 
 use crate::printer::PrinterTarget;
@@ -1647,6 +1651,8 @@ pub struct ProductView {
     pub tax_treatment: &'static str,
     pub category: Option<String>,
     pub active: bool,
+    /// Where this is made, for a café.
+    pub station: Option<&'static str>,
     /// Choices offered when this is rung, so the sell screen can draw the chooser.
     pub option_groups: Vec<ModifierGroupView>,
 }
@@ -1671,6 +1677,7 @@ impl ProductView {
             tax_treatment,
             category: product.category.clone(),
             active: product.active,
+            station: product.station.map(Station::label),
             option_groups: product
                 .option_groups
                 .iter()
@@ -1758,6 +1765,8 @@ pub fn save_product(
     tax_basis_points: i32,
     tax_treatment: String,
     category: Option<String>,
+    // Where this is made, for a café. Absent means it needs no preparation.
+    station: Option<String>,
     // Choices this product offers. Validated by the catalogue before it is written.
     option_groups: Vec<ModifierGroupInput>,
     pin: String,
@@ -1775,6 +1784,19 @@ pub fn save_product(
         unit,
         tax_class: tax_class(&tax_treatment, tax_basis_points)?,
         category: category.and_then(non_empty),
+        station: match station
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(label) => Some(Station::from_label(label).map_err(|unknown| CommandError {
+                // Never defaulted. An item silently routed to the kitchen instead of the bar is a
+                // drink nobody pours, with nothing on any screen to say so.
+                code: "bad_station",
+                message: format!("{unknown} is not a prep station"),
+            })?),
+            None => None,
+        },
         option_groups: option_groups
             .into_iter()
             .map(|group| ModifierGroup {
@@ -2288,4 +2310,181 @@ pub fn split_bill(
             line_ids: part.line_ids,
         })
         .collect())
+}
+
+// -------------------------------------------------------------------------------------------
+// The kitchen
+// -------------------------------------------------------------------------------------------
+
+/// One station's instruction, as a screen shows it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitchenTicketView {
+    pub station: &'static str,
+    /// `order` or `cancellation` — never conflated, because a cancellation read as an order gets
+    /// the dish made twice.
+    pub kind: &'static str,
+    pub table_label: Option<String>,
+    pub covers: Option<u32>,
+    pub round: u32,
+    pub lines: Vec<KitchenLineView>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KitchenLineView {
+    pub name: String,
+    pub quantity_milli: i64,
+    pub modifiers: Vec<String>,
+}
+
+/// What each station has not yet been told about this ticket.
+#[tauri::command]
+pub fn pending_kitchen(
+    state: tauri::State<'_, TerminalState>,
+    sale_id: Uuid,
+) -> Result<Vec<KitchenTicketView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal
+        .pending_kitchen(sale_id)?
+        .into_iter()
+        .map(ticket_view)
+        .collect())
+}
+
+/// What happened when an order went to the stations.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FireOutcome {
+    /// Tickets sent, or that would have been sent had a printer been configured.
+    pub tickets: Vec<KitchenTicketView>,
+    pub printed: bool,
+    /// Why not, when it did not. The order is recorded either way.
+    pub reason: Option<String>,
+}
+
+/// Send everything new to its station.
+///
+/// Records the firing **before** printing, and does not undo it if the printer fails. That ordering
+/// is deliberate and it is the opposite of what feels natural: a paper jam that rolled back the
+/// record would mean the next press reprints lines a station may already have on a half-printed
+/// slip, and the kitchen makes them twice. A recorded firing that failed to print is recoverable —
+/// a waiter walks over and says four covers of curry — while a duplicate is food in the bin.
+#[tauri::command]
+pub fn fire_kitchen(
+    state: tauri::State<'_, TerminalState>,
+    printer: tauri::State<'_, PrinterTarget>,
+    sale_id: Uuid,
+    printed_at: String,
+    paper: String,
+    fired_by: Uuid,
+) -> Result<FireOutcome, CommandError> {
+    let paper = match paper.as_str() {
+        "mm58" => PaperWidth::Mm58,
+        "mm80" => PaperWidth::Mm80,
+        other => {
+            return Err(CommandError {
+                code: "bad_paper",
+                message: format!("{other} is not a paper width"),
+            });
+        }
+    };
+
+    let tickets = {
+        let mut terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+
+        let tickets = terminal.pending_kitchen(sale_id)?;
+        if tickets.is_empty() {
+            return Ok(FireOutcome {
+                tickets: Vec::new(),
+                printed: true,
+                reason: None,
+            });
+        }
+
+        let round = tickets.first().map_or(1, |ticket| ticket.round);
+        let line_ids: Vec<Uuid> = tickets
+            .iter()
+            .filter(|ticket| ticket.kind == sahl_core::kitchen::TicketKind::Order)
+            .flat_map(|ticket| ticket.lines.iter().map(|line| line.line_id))
+            .collect();
+
+        if !line_ids.is_empty() {
+            terminal.record(
+                &SaleEvent::LinesFired {
+                    sale_id,
+                    line_ids,
+                    round,
+                    at: now(),
+                    fired_by,
+                },
+                new_id(),
+                now(),
+            )?;
+        }
+        tickets
+    };
+
+    let mut printed = true;
+    let mut reason = None;
+    for ticket in &tickets {
+        let data = EscposKitchenTicket {
+            station: ticket.station.heading().to_owned(),
+            is_cancellation: ticket.kind == sahl_core::kitchen::TicketKind::Cancellation,
+            table_label: ticket.table_label.clone(),
+            covers: ticket.covers,
+            round: ticket.round,
+            printed_at: printed_at.clone(),
+            lines: ticket
+                .lines
+                .iter()
+                .map(|line| EscposKitchenLine {
+                    name: line.name.clone(),
+                    quantity: Quantity::from_milli(line.quantity_milli),
+                    modifiers: line.modifiers.clone(),
+                })
+                .collect(),
+        };
+
+        let job = EscposDocument::render_kitchen(&data, paper);
+        if let Err(error) = crate::printer::print(&printer, job.bytes()) {
+            printed = false;
+            reason = Some(error.to_string());
+        }
+    }
+
+    Ok(FireOutcome {
+        tickets: tickets.into_iter().map(ticket_view).collect(),
+        printed,
+        reason,
+    })
+}
+
+fn ticket_view(ticket: sahl_core::kitchen::KitchenTicket) -> KitchenTicketView {
+    KitchenTicketView {
+        station: ticket.station.label(),
+        kind: match ticket.kind {
+            sahl_core::kitchen::TicketKind::Order => "order",
+            sahl_core::kitchen::TicketKind::Cancellation => "cancellation",
+        },
+        table_label: ticket.table_label,
+        covers: ticket.covers,
+        round: ticket.round,
+        lines: ticket
+            .lines
+            .into_iter()
+            .map(|line| KitchenLineView {
+                name: line.name,
+                quantity_milli: line.quantity_milli,
+                modifiers: line.modifiers,
+            })
+            .collect(),
+    }
 }

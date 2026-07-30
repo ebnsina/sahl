@@ -25,6 +25,9 @@ pub struct ProductDetails {
     pub unit: Unit,
     pub tax_class: TaxClass,
     pub category: Option<String>,
+    /// Where this is made, for a café.
+    #[serde(default)]
+    pub station: Option<crate::kitchen::Station>,
     /// Choices offered when this is rung. `default` so events written before options existed still
     /// deserialize, and their recorded hashes stay valid.
     #[serde(default)]
@@ -117,6 +120,7 @@ impl CatalogueEvent {
                     unit: details.unit,
                     tax_class: details.tax_class,
                     category: details.category.clone(),
+                    station: details.station,
                     option_groups: details.option_groups.clone(),
                     active,
                 };
@@ -156,6 +160,7 @@ mod tests {
             unit: Unit::Piece,
             tax_class: TaxClass::standard(1500),
             category: Some("Staples".to_owned()),
+            station: None,
             option_groups: Vec::new(),
         }
     }

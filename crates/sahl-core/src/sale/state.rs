@@ -60,6 +60,9 @@ pub struct Sale {
     lease: Option<TicketLease>,
     /// Where the party is sitting, for a café. `None` for every retail sale ever rung.
     seating: Option<Seating>,
+    /// Lines already sent to a prep station, and how many rounds have gone.
+    fired: Vec<Uuid>,
+    rounds_fired: u32,
 }
 
 /// Where a ticket is sitting.
@@ -118,6 +121,8 @@ impl Sale {
             settled_at: None,
             lease: None,
             seating: None,
+            fired: Vec::new(),
+            rounds_fired: 0,
         })
     }
 
@@ -249,6 +254,19 @@ impl Sale {
                     covers: *covers,
                     seated_at: *at,
                 });
+            }
+
+            SaleEvent::LinesFired {
+                line_ids, round, ..
+            } => {
+                for line_id in line_ids {
+                    if !self.fired.contains(line_id) {
+                        self.fired.push(*line_id);
+                    }
+                }
+                // The highest round wins rather than a count, so a replay that sees the same firing
+                // twice does not invent a round the kitchen never saw.
+                self.rounds_fired = self.rounds_fired.max(*round);
             }
 
             SaleEvent::OrderDiscounted { discount, .. } => {
@@ -474,6 +492,25 @@ impl Sale {
     #[must_use]
     pub const fn currency(&self) -> Currency {
         self.currency
+    }
+
+    /// Lines a prep station has already been told about.
+    #[must_use]
+    pub fn fired(&self) -> &[Uuid] {
+        &self.fired
+    }
+
+    /// How many rounds have gone to the kitchen.
+    #[must_use]
+    pub const fn rounds_fired(&self) -> u32 {
+        self.rounds_fired
+    }
+
+    /// Whether anything on this ticket has not yet been sent.
+    #[must_use]
+    pub fn has_unfired_lines(&self) -> bool {
+        self.active_lines()
+            .any(|line| !self.fired.contains(&line.id))
     }
 
     /// Where this ticket is sitting, for a café.

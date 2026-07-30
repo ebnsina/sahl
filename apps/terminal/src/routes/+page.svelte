@@ -39,6 +39,7 @@
 		type SyncView,
 		type ModifierGroup,
 		type ProductView,
+		type KitchenTicketView,
 		type SplitPartView,
 		type TillStatus
 	} from '$lib/till';
@@ -66,6 +67,9 @@
 	/** Shares of the bill, once someone asks to split it. */
 	let split = $state<SplitPartView[] | null>(null);
 	let splitWays = $state(2);
+	/** What the stations have not yet been told about this ticket. */
+	let pendingTickets = $state<KitchenTicketView[]>([]);
+	let fireOutcome = $state<{ printed: boolean; reason: string | null } | null>(null);
 	let printOutcome = $state<PrintOutcome | null>(null);
 	let status = $state<TillStatus | null>(null);
 	let sync = $state<SyncView | null>(null);
@@ -90,6 +94,7 @@
 			status = await till.status();
 			sync = await till.syncStatus();
 			tickets = await till.openTickets();
+			await refreshKitchen(sale?.id);
 		} catch (thrown) {
 			error = asTillError(thrown);
 			if (error.code === 'no_till') available = false;
@@ -114,9 +119,41 @@
 		}
 	});
 
+	async function refreshKitchen(saleId: string | undefined) {
+		if (!saleId) {
+			pendingTickets = [];
+			return;
+		}
+		try {
+			pendingTickets = await till.pendingKitchen(saleId);
+		} catch {
+			// A kitchen view that cannot load must not stop someone selling.
+			pendingTickets = [];
+		}
+	}
+
+	function fireKitchen() {
+		const current = sale;
+		if (!current) return;
+		void run(
+			() =>
+				till.fireKitchen({
+					saleId: current.id,
+					printedAt: format.dateTime(Date.now()),
+					paper: 'mm80',
+					firedBy: CASHIER
+				}),
+			(result) => {
+				fireOutcome = { printed: result.printed, reason: result.reason };
+				void refreshKitchen(current.id);
+			}
+		);
+	}
+
 	async function refreshTickets() {
 		try {
 			tickets = await till.openTickets();
+			await refreshKitchen(sale?.id);
 		} catch {
 			// A ticket list that cannot load must not stop someone selling.
 			tickets = [];
@@ -148,6 +185,8 @@
 		documentProblem = null;
 		printOutcome = null;
 		split = null;
+		fireOutcome = null;
+		pendingTickets = [];
 		void run(
 			() => till.openSale(CASHIER),
 			(result) => {
@@ -694,6 +733,50 @@
 									/>
 								{/snippet}
 							</Field>
+							{#if pendingTickets.length > 0}
+								<div class="border-primary bg-primary-subtle mb-2 flex flex-col gap-2 border p-3">
+									<div class="flex items-baseline justify-between gap-2">
+										<span class="label-caps">Not sent yet</span>
+										<span class="text-secondary text-text-secondary">
+											Round {format.integer(pendingTickets[0].round)}
+										</span>
+									</div>
+
+									{#each pendingTickets as ticket (ticket.station + ticket.kind)}
+										<div class="flex flex-col gap-0.5">
+											<span class="text-secondary font-medium">
+												{ticket.station}
+												{#if ticket.kind === 'cancellation'}
+													— cancel
+												{/if}
+											</span>
+											{#each ticket.lines as ticketLine (ticketLine.name + ticketLine.modifiers.join())}
+												<span class="text-secondary text-text-secondary">
+													{format.quantity(ticketLine.quantityMilli)} × {ticketLine.name}{ticketLine
+														.modifiers.length > 0
+														? ` (${ticketLine.modifiers.join(', ')})`
+														: ''}
+												</span>
+											{/each}
+										</div>
+									{/each}
+
+									<Button variant="primary" block onclick={fireKitchen} disabled={busy}>
+										Send to kitchen
+									</Button>
+								</div>
+							{:else if fireOutcome && !fireOutcome.printed}
+								<!-- The order is recorded either way. Rolling it back on a print failure would
+								     let the next press resend lines a station may already have. -->
+								<div class="border-warn bg-warn-subtle text-warn-text mb-2 border p-3">
+									<p class="label-caps">Sent, but not printed</p>
+									<p class="text-secondary mt-1">{fireOutcome.reason}</p>
+									<p class="text-secondary mt-1">
+										The order is recorded — tell the station directly rather than sending again.
+									</p>
+								</div>
+							{/if}
+
 							{#if split}
 								<div class="border-border bg-surface-sunken mb-2 flex flex-col gap-2 border p-3">
 									<div class="flex items-baseline justify-between">

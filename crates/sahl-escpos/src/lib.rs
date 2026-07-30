@@ -33,5 +33,7 @@ pub mod document;
 pub mod receipt;
 
 pub use command::{Align, DrawerPin, RasterError};
-pub use document::{Document, ReceiptData, ReceiptLine, ReceiptTaxGroup};
+pub use document::{
+    Document, KitchenTicketData, KitchenTicketLine, ReceiptData, ReceiptLine, ReceiptTaxGroup,
+};
 pub use receipt::PaperWidth;

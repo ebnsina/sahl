@@ -275,6 +275,8 @@ export interface ProductView {
 	taxTreatment: TaxTreatment;
 	category: string | null;
 	active: boolean;
+	/** Where this is made, for a café. */
+	station: string | null;
 	/** Choices offered when this is rung, so the sell screen can draw the chooser. */
 	optionGroups: ModifierGroup[];
 }
@@ -310,6 +312,24 @@ export interface SplitPartView {
 	amountMinor: number;
 	/** The lines this part covers. Empty for an even split. */
 	lineIds: string[];
+}
+
+/** One station's instruction. */
+export interface KitchenTicketView {
+	station: string;
+	/** `order` or `cancellation` — never conflated. */
+	kind: 'order' | 'cancellation';
+	tableLabel: string | null;
+	covers: number | null;
+	round: number;
+	lines: Array<{ name: string; quantityMilli: number; modifiers: string[] }>;
+}
+
+export interface FireOutcome {
+	tickets: KitchenTicketView[];
+	printed: boolean;
+	/** Why not. The order is recorded either way. */
+	reason: string | null;
 }
 
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
@@ -417,6 +437,22 @@ export const till = {
 	 */
 	splitBill: (saleId: string, ways: number, lineAssignment: string[][] = []) =>
 		call<SplitPartView[]>('split_bill', { saleId, ways, lineAssignment }),
+
+	/** What each station has not yet been told about. */
+	pendingKitchen: (saleId: string) => call<KitchenTicketView[]>('pending_kitchen', { saleId }),
+
+	/**
+	 * Send everything new to its station.
+	 *
+	 * Records the firing before printing and never undoes it on a print failure — a rollback would
+	 * let the next press resend lines a station may already have on a half-printed slip.
+	 */
+	fireKitchen: (input: {
+		saleId: string;
+		printedAt: string;
+		paper: 'mm58' | 'mm80';
+		firedBy: string;
+	}) => call<FireOutcome>('fire_kitchen', input),
 
 	/** Abandon tickets with nothing on them. Never touches one holding items. */
 	discardEmptyTickets: (abandonedBy: string) =>
@@ -531,6 +567,7 @@ export const till = {
 		taxBasisPoints: number;
 		taxTreatment: TaxTreatment;
 		category?: string | null;
+		station?: string | null;
 		/** Ids are absent for anything newly added; the till mints them. */
 		optionGroups: Array<{
 			id: string | null;
