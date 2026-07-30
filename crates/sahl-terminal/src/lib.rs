@@ -150,6 +150,8 @@ pub fn run() {
             commands::can_seed,
             #[cfg(debug_assertions)]
             commands::seed_demo,
+            #[cfg(debug_assertions)]
+            commands::reset_till,
             commands::sign_out,
             commands::enrol_staff,
             commands::audit_feed,

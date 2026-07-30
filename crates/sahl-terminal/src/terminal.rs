@@ -1046,6 +1046,31 @@ impl Terminal {
 }
 
 impl Terminal {
+    /// Erase every event and every projection. **Debug builds only.**
+    ///
+    /// Rebuilds the in-memory state from nothing rather than reloading, so the running till is
+    /// genuinely empty afterwards and not merely pointed at an empty store.
+    ///
+    /// # Errors
+    /// [`TerminalError::Store`] if the erase fails.
+    #[cfg(debug_assertions)]
+    pub fn erase_everything(&mut self) -> Result<(), TerminalError> {
+        self.store.erase_everything()?;
+
+        self.chain = EventChain::resume(self.identity.device_id, self.store.tip()?);
+        self.fiscal = FiscalChain::resume(self.identity.device_id, FiscalTip::GENESIS);
+        self.book = SaleBook::new();
+        self.shift = None;
+        self.stock = InventoryBook::new();
+        self.staff = Directory::new();
+        self.catalogue = Catalogue::new();
+        self.floor = Floor::new();
+        self.outlet = None;
+        self.orders = BTreeMap::new();
+        self.session = Presence::SignedOut;
+        Ok(())
+    }
+
     /// What the log says about how this till is being used.
     ///
     /// Read from the same projection the rest of the screen uses, so a finding can never describe
@@ -3851,6 +3876,45 @@ mod tests {
     fn an_unknown_market_is_refused_rather_than_defaulted() {
         // Seeding the wrong country's tax setup would be discovered on a challan.
         assert!(crate::seed::Market::from_label("france").is_err());
+    }
+
+    #[test]
+    fn erasing_leaves_a_till_that_can_be_seeded_again() {
+        // The point of it: switching demo markets. A reset that left the staff behind would refuse
+        // the next seed, which is the state that made this necessary in the first place.
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
+        assert!(!till.staff().is_empty());
+
+        till.erase_everything().expect("erases");
+
+        assert!(till.staff().is_empty());
+        assert!(till.outlet().is_none());
+        assert_eq!(till.catalogue().all().len(), 0);
+        assert_eq!(till.book().completed().count(), 0);
+        assert_eq!(till.fiscal_tip().counter, 0, "invoice numbers start again");
+
+        crate::seed::seed(&mut till, crate::seed::Market::Gulf, at(0)).expect("re-seeds");
+        assert_eq!(
+            till.outlet().expect("configured").currency,
+            sahl_core::Currency::Sar
+        );
+    }
+
+    #[test]
+    fn an_erased_till_survives_a_restart() {
+        // Erasing empties the store, not just the projections. A restart that rebuilt the old
+        // shop from events still on disk would be worse than not offering the button.
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
+        till.erase_everything().expect("erases");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert!(reloaded.staff().is_empty());
+        assert!(reloaded.outlet().is_none());
     }
 
     #[test]

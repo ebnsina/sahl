@@ -586,6 +586,9 @@ export const till = {
 	/** Fill an empty till with a demo shop. Returns the PIN every demo account shares. */
 	seedDemo: (market: 'bangladesh' | 'gulf') => call<string>('seed_demo', { market }),
 
+	/** Erase everything, so the other market can be seeded. Debug builds only. */
+	resetTill: () => call<void>('reset_till'),
+
 	enrolStaff: (input: {
 		name: string;
 		role: StaffView['role'];

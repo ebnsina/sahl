@@ -333,6 +333,23 @@ impl EventStore {
     ///
     /// # Errors
     /// [`StoreError`] on a database failure or corrupt row.
+    /// Erase every event. **Debug builds only.**
+    ///
+    /// The one function in this program that destroys records, and it exists for exactly one
+    /// reason: switching between demo markets otherwise means quitting the app and finding a
+    /// SQLite file. It is fenced at compile time so no release binary contains it at all.
+    ///
+    /// # Errors
+    /// [`StoreError`] if the delete fails.
+    #[cfg(debug_assertions)]
+    pub fn erase_everything(&mut self) -> Result<(), StoreError> {
+        self.connection.execute("DELETE FROM event", [])?;
+        // Reset rather than delete: the row is a singleton the cursor lookups expect to exist.
+        self.connection
+            .execute("UPDATE sync_state SET pull_cursor = 0 WHERE id = 1", [])?;
+        Ok(())
+    }
+
     pub fn load_projection_input(&self) -> Result<Vec<EventEnvelope>, StoreError> {
         // Ordered by when the event happened, then by id to break ties deterministically. Two tills
         // sealing at the same millisecond must still replay identically on every device.

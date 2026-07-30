@@ -1052,6 +1052,23 @@ pub fn seed_demo(
     Ok(crate::seed::DEMO_PIN.to_owned())
 }
 
+/// Erase everything and start over. **Debug builds only.**
+///
+/// Destroys records, which nothing else in this program does. It exists because trying the other
+/// market otherwise means quitting the app and deleting a SQLite file by hand — and a demo you
+/// cannot easily re-run is a demo nobody re-runs.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn reset_till(state: tauri::State<'_, TerminalState>) -> Result<(), CommandError> {
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    terminal.erase_everything()?;
+    Ok(())
+}
+
 /// Whether this build can seed at all, so the button is absent from a release rather than failing.
 #[tauri::command]
 pub const fn can_seed() -> bool {

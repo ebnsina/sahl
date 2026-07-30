@@ -66,6 +66,14 @@
 	/** Absent from a release build, where seeding a real shop's books is not a feature. */
 	let canSeed = $state(false);
 	let seededPin = $state<string | null>(null);
+	/**
+	 * Whether the form has read the outlet it is about to overwrite.
+	 *
+	 * Saving is a full replacement, so a form that never loaded would write its blanks over real
+	 * settings — which is exactly what happened to a seeded approval policy: the limits went back
+	 * as zero because the fields had never been filled in.
+	 */
+	let loaded = $state(false);
 	let error = $state<{ code: string; message: string } | null>(null);
 	let saved = $state(false);
 	let busy = $state(false);
@@ -112,6 +120,8 @@
 
 	function adopt(result: OutletView | null) {
 		outlet = result;
+		// An outlet that has never been configured is loaded too — there is nothing to lose.
+		loaded = true;
 		if (!result) return;
 		name = result.name;
 		profile = result.profile;
@@ -157,6 +167,25 @@
 		}
 	});
 
+	function startOver() {
+		void run(
+			() => till.resetTill(),
+			() => {
+				seededPin = null;
+				outlet = null;
+				loaded = false;
+				name = '';
+				address = '';
+				taxRegistration = '';
+				discountLimit = '';
+				discountRatePercent = '';
+				voidLimit = '';
+				scaleOn = false;
+				void run(() => till.outletConfig(), adopt);
+			}
+		);
+	}
+
 	function seed(market: 'bangladesh' | 'gulf') {
 		void run(
 			() => till.seedDemo(market),
@@ -169,6 +198,15 @@
 
 	function startSave() {
 		saved = false;
+		if (!loaded) {
+			// Refused rather than saved partially. A full replacement written from a form that never
+			// read the current settings is how a configured outlet silently loses them.
+			error = {
+				code: 'not_loaded',
+				message: 'Still reading the current settings — try again in a moment'
+			};
+			return;
+		}
 		if (!name.trim()) {
 			error = { code: 'bad_name', message: 'Enter the outlet name' };
 			return;
@@ -572,7 +610,7 @@
 								<p class="text-body">Seeded. Every account's PIN is {seededPin}.</p>
 								<p class="text-secondary text-text-muted">
 									Karim Uddin owns it, Habib Rahman manages, Ruma Akter and Nasrin Sultana ring
-									sales. Restart the till to pick up the new outlet.
+									sales.
 								</p>
 							</div>
 						{:else}
@@ -592,6 +630,19 @@
 								</div>
 								<p class="text-secondary text-text-muted">
 									Taka, Mushak 6.3 and a counter scale · riyals, ZATCA and table service.
+								</p>
+							</div>
+						{/if}
+
+						{#if outlet || seededPin}
+							<div class="border-border mt-3 border-t pt-3">
+								<Button variant="danger" block disabled={busy} onclick={startOver}>
+									Erase everything and start over
+								</Button>
+								<p class="text-secondary text-text-muted mt-2">
+									The only thing in this program that destroys records, and it only exists in a
+									debug build. Seeding cannot replace a shop — it appends — so trying the other
+									market means clearing this one first.
 								</p>
 							</div>
 						{/if}
