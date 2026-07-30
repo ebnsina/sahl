@@ -44,6 +44,11 @@ pub enum SaleEvent {
         unit_price: Money,
         quantity: Quantity,
         tax_class: TaxClass,
+        /// Options chosen at the till. `default` so events written before modifiers existed still
+        /// deserialize — and, because verification re-hashes the *stored* payload rather than a
+        /// re-serialisation of this type, their recorded hashes stay valid.
+        #[serde(default)]
+        modifiers: Vec<crate::sale::Modifier>,
     },
 
     /// Quantity corrected — a mis-scan, or a weighed item re-weighed.

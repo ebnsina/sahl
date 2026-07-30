@@ -91,6 +91,7 @@ fn events_for(ticket: &Ticket, seq: u128) -> Vec<SaleEvent> {
                 1 => TaxClass::standard(750),
                 _ => TaxClass::Exempt,
             },
+            modifiers: Vec::new(),
         });
     }
 

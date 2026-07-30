@@ -171,6 +171,7 @@ mod tests {
             unit_price: bdt(minor),
             quantity: Quantity::ONE,
             tax_class: TaxClass::standard(1500),
+            modifiers: Vec::new(),
         }
     }
 

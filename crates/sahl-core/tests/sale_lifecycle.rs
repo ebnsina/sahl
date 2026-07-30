@@ -50,6 +50,7 @@ fn line(line_id: u128, name: &str, unit_minor: i64, qty_milli: i64) -> SaleEvent
         unit_price: bdt(unit_minor),
         quantity: Quantity::from_milli(qty_milli),
         tax_class: VAT_15,
+        modifiers: Vec::new(),
     }
 }
 
@@ -341,6 +342,7 @@ fn events_for_another_sale_are_refused() {
         unit_price: bdt(100),
         quantity: Quantity::ONE,
         tax_class: VAT_15,
+        modifiers: Vec::new(),
     };
     let result = Sale::replay(&[opened(), foreign]);
 

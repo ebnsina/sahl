@@ -1166,6 +1166,7 @@ mod tests {
             unit_price: Money::from_minor(minor, BDT),
             quantity: Quantity::ONE,
             tax_class: TaxClass::standard(1500),
+            modifiers: Vec::new(),
         }
     }
 
@@ -2085,6 +2086,7 @@ mod tests {
                 unit_price: Money::from_minor(minor, BDT),
                 quantity: Quantity::ONE,
                 tax_class: TaxClass::standard(1500),
+                modifiers: Vec::new(),
             },
             id(base + 3),
             at(1),
@@ -2237,6 +2239,7 @@ mod tests {
                 unit_price: Money::from_minor(32_000, BDT),
                 quantity: Quantity::ONE,
                 tax_class: TaxClass::standard(1500),
+                modifiers: Vec::new(),
             },
             SaleEvent::TenderRecorded {
                 sale_id: their_sale,
@@ -2399,6 +2402,7 @@ mod tests {
                     unit_price: Money::from_minor(9_000, BDT),
                     quantity: Quantity::ONE,
                     tax_class: class,
+                    modifiers: Vec::new(),
                 },
                 id(line_id + 0x1000),
                 at(1),

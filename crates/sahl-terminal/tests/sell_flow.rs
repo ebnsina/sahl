@@ -100,6 +100,7 @@ impl Till {
             } else {
                 TaxClass::standard(bp)
             },
+            modifiers: Vec::new(),
         })
     }
 
@@ -322,6 +323,7 @@ fn a_till_refuses_to_write_to_a_ticket_another_device_holds() {
             unit_price: bdt(1_000),
             quantity: Quantity::ONE,
             tax_class: TaxClass::standard(1500),
+            modifiers: Vec::new(),
         },
         id(0xF00),
         Clock::from_millis(1_753_000_060_000),
@@ -374,6 +376,7 @@ fn a_sibling_till_can_take_an_idle_ticket() {
             unit_price: bdt(2_000),
             quantity: Quantity::ONE,
             tax_class: TaxClass::standard(1500),
+            modifiers: Vec::new(),
         },
         id(0xF01),
         Clock::from_millis(1_753_000_000_000 + 11 * 60 * 1_000),

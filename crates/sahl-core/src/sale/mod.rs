@@ -25,6 +25,6 @@ mod tender;
 
 pub use error::SaleError;
 pub use event::SaleEvent;
-pub use line::{LineVoid, SaleLine, VoidReason};
+pub use line::{LineVoid, Modifier, SaleLine, VoidReason};
 pub use state::{Sale, SaleStatus, cash};
 pub use tender::{Tender, TenderMethod, Wallet};

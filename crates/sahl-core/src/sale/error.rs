@@ -19,6 +19,11 @@ pub enum SaleError {
     #[error("a seated ticket needs at least one cover")]
     NoCovers,
 
+    /// Options that take a line below zero would let anyone move money out of a till by ringing a
+    /// sale.
+    #[error("line {line_id} prices below zero once its options are applied")]
+    NegativeLinePrice { line_id: uuid::Uuid },
+
     #[error("tax error in sale: {0}")]
     Tax(#[from] TaxError),
 

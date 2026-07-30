@@ -155,12 +155,13 @@ impl Sale {
                 unit_price,
                 quantity,
                 tax_class,
+                modifiers,
                 ..
             } => {
                 if self.find_line(*line_id).is_some() {
                     return Err(SaleError::DuplicateLine { line_id: *line_id });
                 }
-                self.lines.push(SaleLine {
+                let line = SaleLine {
                     id: *line_id,
                     product_id: *product_id,
                     name: name.clone(),
@@ -168,8 +169,15 @@ impl Sale {
                     quantity: *quantity,
                     tax_class: *tax_class,
                     discount: Discount::None,
+                    modifiers: modifiers.clone(),
                     void: None,
-                });
+                };
+                // A line whose options take it below zero would let anyone move money out of a till
+                // by ringing a sale, so it is refused rather than recorded.
+                if line.effective_unit_price()?.minor().is_negative() {
+                    return Err(SaleError::NegativeLinePrice { line_id: *line_id });
+                }
+                self.lines.push(line);
             }
 
             SaleEvent::LineQuantityChanged {
@@ -331,7 +339,7 @@ impl Sale {
             .iter()
             .filter(|line| line.is_active())
             .map(SaleLine::to_tax_input)
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         if lines.is_empty() {
             return Err(SaleError::NoActiveLines);

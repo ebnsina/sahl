@@ -132,6 +132,7 @@ fn ring_sale(terminal: &mut Terminal, n: u32) -> i64 {
         unit_price: Money::from_minor(total, BDT),
         quantity: Quantity::ONE,
         tax_class: TaxClass::standard(1500),
+        modifiers: Vec::new(),
     });
     record(&SaleEvent::TenderRecorded {
         sale_id,

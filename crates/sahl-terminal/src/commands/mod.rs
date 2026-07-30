@@ -250,6 +250,7 @@ pub fn add_line(
             unit_price,
             quantity,
             tax_class,
+            modifiers: Vec::new(),
         },
     )
 }

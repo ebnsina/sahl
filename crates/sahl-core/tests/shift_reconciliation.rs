@@ -97,6 +97,7 @@ fn sale(n: u128, total: i64, tendered: i64, method: TenderMethod, minute: i64) -
             unit_price: bdt(total),
             quantity: Quantity::ONE,
             tax_class: TaxClass::standard(1500),
+            modifiers: Vec::new(),
         },
         SaleEvent::TenderRecorded {
             sale_id,
@@ -325,6 +326,7 @@ fn voids_across_the_shift_are_totalled_for_the_owner_feed() {
             unit_price: bdt(10_000),
             quantity: Quantity::ONE,
             tax_class: TaxClass::standard(1500),
+            modifiers: Vec::new(),
         },
         SaleEvent::LineAdded {
             sale_id,
@@ -334,6 +336,7 @@ fn voids_across_the_shift_are_totalled_for_the_owner_feed() {
             unit_price: bdt(90_000),
             quantity: Quantity::ONE,
             tax_class: TaxClass::standard(1500),
+            modifiers: Vec::new(),
         },
         SaleEvent::LineVoided {
             sale_id,
