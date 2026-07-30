@@ -39,6 +39,8 @@
 	let staff = $state<StaffView[]>([]);
 	let feed = $state<AuditView[]>([]);
 	let findings = $state<FindingView[]>([]);
+	/** Absent from a release build, where there is nothing to seed. */
+	let canSeed = $state(false);
 	let error = $state<{ code: string; message: string } | null>(null);
 	let busy = $state(false);
 	let available = $state(true);
@@ -53,6 +55,21 @@
 	let firstPerson = $derived(staff.length === 0);
 	let flagged = $derived(feed.filter((entry) => entry.unapproved));
 	let hasApprover = $derived(staff.some((member) => member.role !== 'cashier'));
+
+	/**
+	 * What will actually be sent.
+	 *
+	 * Derived rather than assigned, because the rule is not "the form usually says owner" — it is
+	 * that the first person *is* an owner. This was set inside the async refresh, so the disabled
+	 * select could sit there reading "Cashier" while claiming to be honest about what it would
+	 * send, and the till refused the enrolment with no way for the screen to explain itself.
+	 */
+	let roleToEnrol = $derived<StaffView['role']>(firstPerson ? 'owner' : role);
+
+	// Keeps the visible control in step with what is sent, rather than the two being set apart.
+	$effect(() => {
+		if (firstPerson) role = 'owner';
+	});
 
 	async function run<T>(action: () => Promise<T>, onDone?: (result: T) => void) {
 		busy = true;
@@ -71,13 +88,14 @@
 		staff = await till.staffList();
 		feed = await till.auditFeed();
 		findings = await till.anomalyFeed();
-		// Keeps the disabled select honest: it shows owner because owner is what will be sent.
-		if (staff.length === 0) role = 'owner';
 	}
 
 	$effect(() => {
 		available = isTillAvailable();
-		if (available) void run(refresh);
+		if (available) {
+			void run(refresh);
+			void till.canSeed().then((allowed) => (canSeed = allowed));
+		}
 	});
 
 	function startEnrol() {
@@ -93,7 +111,7 @@
 		// the same rule; this only decides whether to bother asking.
 		if (firstPerson) {
 			void run(
-				() => till.enrolStaff({ name, role, newPin, pin: '' }),
+				() => till.enrolStaff({ name, role: roleToEnrol, newPin, pin: '' }),
 				(result) => {
 					staff = result;
 					name = '';
@@ -111,7 +129,7 @@
 			busy = true;
 			approvalError = null;
 			try {
-				staff = await till.enrolStaff({ name, role, newPin, pin });
+				staff = await till.enrolStaff({ name, role: roleToEnrol, newPin, pin });
 				feed = await till.auditFeed();
 				pendingEnrol = false;
 				name = '';
@@ -193,6 +211,13 @@
 							Nobody enrolled yet. Until someone is, no void, discount or cash movement can be
 							approved — the till will say so rather than letting them through.
 						</p>
+						{#if canSeed}
+							<p class="text-secondary text-text-muted px-4 pb-4">
+								Setting up by hand is one way. <a class="text-primary underline" href="/settings">
+									Settings
+								</a> can also seed a whole demo shop — staff, catalogue, a day's trading.
+							</p>
+						{/if}
 					{:else}
 						{#each staff as member (member.id)}
 							<div
@@ -299,15 +324,18 @@
 								<Select
 									{id}
 									{describedBy}
-									bind:value={role}
+									value={roleToEnrol}
 									options={ROLES}
 									disabled={firstPerson}
+									onchange={(event) => {
+										role = (event.currentTarget as HTMLSelectElement).value as StaffView['role'];
+									}}
 								/>
 							{/snippet}
 						</Field>
 
 						<p class="text-secondary text-text-muted">
-							{ROLES.find((entry) => entry.value === role)?.note}
+							{ROLES.find((entry) => entry.value === roleToEnrol)?.note}
 						</p>
 
 						<Field id="staff-pin" label="PIN" hint="4 to 8 digits. Not 1234 or 0000.">
