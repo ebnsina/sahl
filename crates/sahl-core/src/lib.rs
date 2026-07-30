@@ -35,6 +35,7 @@ pub mod floor;
 pub mod inventory;
 pub mod kitchen;
 pub mod ledger;
+pub mod messaging;
 pub mod money;
 pub mod outlet;
 pub mod policy;
