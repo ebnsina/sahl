@@ -580,6 +580,12 @@ export const till = {
 
 	signOut: () => call<void>('sign_out'),
 
+	/** Whether this build can seed demo data at all. False in a release binary. */
+	canSeed: () => call<boolean>('can_seed'),
+
+	/** Fill an empty till with a demo shop. Returns the PIN every demo account shares. */
+	seedDemo: (market: 'bangladesh' | 'gulf') => call<string>('seed_demo', { market }),
+
 	enrolStaff: (input: {
 		name: string;
 		role: StaffView['role'];

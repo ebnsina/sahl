@@ -1023,6 +1023,41 @@ pub fn sign_in(
         })
 }
 
+/// Fill an empty till with a demo shop. **Debug builds only.**
+///
+/// Refuses a till that already has staff. Not for tidiness: this writes real events to a real
+/// append-only log, and there is no undo — so the one moment it is safe is before anybody has put
+/// anything in.
+#[cfg(debug_assertions)]
+#[tauri::command]
+pub fn seed_demo(
+    state: tauri::State<'_, TerminalState>,
+    market: String,
+) -> Result<String, CommandError> {
+    let market = crate::seed::Market::from_label(&market)?;
+
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    if !terminal.staff().is_empty() {
+        return Err(CommandError {
+            code: "not_empty",
+            message: "this till already has staff — seeding appends, it cannot replace".to_owned(),
+        });
+    }
+
+    crate::seed::seed(&mut terminal, market, now())?;
+    Ok(crate::seed::DEMO_PIN.to_owned())
+}
+
+/// Whether this build can seed at all, so the button is absent from a release rather than failing.
+#[tauri::command]
+pub const fn can_seed() -> bool {
+    cfg!(debug_assertions)
+}
+
 /// Who is at the till, or nobody.
 ///
 /// The screen asks rather than holding its own copy: a session expires by being read, so a cached

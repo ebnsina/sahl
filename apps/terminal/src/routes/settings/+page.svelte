@@ -15,6 +15,7 @@
 		Badge,
 		Button,
 		Card,
+		Checkbox,
 		Field,
 		Input,
 		Logo,
@@ -62,6 +63,9 @@
 	const TIMEZONES = ['Asia/Dhaka', 'Asia/Riyadh', 'Asia/Dubai', 'UTC'];
 
 	let outlet = $state<OutletView | null>(null);
+	/** Absent from a release build, where seeding a real shop's books is not a feature. */
+	let canSeed = $state(false);
+	let seededPin = $state<string | null>(null);
 	let error = $state<{ code: string; message: string } | null>(null);
 	let saved = $state(false);
 	let busy = $state(false);
@@ -147,8 +151,21 @@
 
 	$effect(() => {
 		available = isTillAvailable();
-		if (available) void run(() => till.outletConfig(), adopt);
+		if (available) {
+			void run(() => till.outletConfig(), adopt);
+			void till.canSeed().then((allowed) => (canSeed = allowed));
+		}
 	});
+
+	function seed(market: 'bangladesh' | 'gulf') {
+		void run(
+			() => till.seedDemo(market),
+			(pin) => {
+				seededPin = pin;
+				void run(() => till.outletConfig(), adopt);
+			}
+		);
+	}
 
 	function startSave() {
 		saved = false;
@@ -360,16 +377,11 @@
 						</div>
 
 						<div class="border-border flex flex-col gap-3 border-t pt-4">
-							<label class="flex items-start gap-2">
-								<input type="checkbox" class="mt-1" bind:checked={scaleOn} />
-								<span>
-									<span class="font-medium">A counter scale prints labels</span>
-									<span class="text-secondary text-text-muted block">
-										The weight or the price is hidden inside an ordinary-looking barcode. Nothing
-										about the label says which, so the layout has to be set here.
-									</span>
-								</span>
-							</label>
+							<Checkbox bind:checked={scaleOn} label="A counter scale prints labels" />
+							<p class="text-secondary text-text-muted -mt-2 ps-6">
+								The weight or the price is hidden inside an ordinary-looking barcode. Nothing about
+								the label says which, so the layout has to be set here.
+							</p>
 
 							{#if scaleOn}
 								<Field
@@ -550,6 +562,39 @@
 							Capabilities follow the profile — they are a row, not a setting, so two outlets on the
 							same profile always behave the same way.
 						</p>
+					</Card>
+				{/if}
+
+				{#if canSeed}
+					<Card label="Demo data">
+						{#if seededPin}
+							<div class="flex flex-col gap-2">
+								<p class="text-body">Seeded. Every account's PIN is {seededPin}.</p>
+								<p class="text-secondary text-text-muted">
+									Karim Uddin owns it, Habib Rahman manages, Ruma Akter and Nasrin Sultana ring
+									sales. Restart the till to pick up the new outlet.
+								</p>
+							</div>
+						{:else}
+							<div class="flex flex-col gap-3">
+								<p class="text-secondary text-text-secondary">
+									Fills an empty till with a whole shop — staff, catalogue, tax setup, floor. Only
+									on a till nobody has used, because this appends to an append-only log and there is
+									no undo.
+								</p>
+								<div class="grid grid-cols-2 gap-2">
+									<Button variant="secondary" disabled={busy} onclick={() => seed('bangladesh')}>
+										Dhaka grocery
+									</Button>
+									<Button variant="secondary" disabled={busy} onclick={() => seed('gulf')}>
+										Riyadh café
+									</Button>
+								</div>
+								<p class="text-secondary text-text-muted">
+									Taka, Mushak 6.3 and a counter scale · riyals, ZATCA and table service.
+								</p>
+							</div>
+						{/if}
 					</Card>
 				{/if}
 

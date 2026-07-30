@@ -3708,6 +3708,105 @@ mod tests {
         );
     }
 
+    // ------------------------------------------------------------------------------------------
+    // Demo data
+    // ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn seeding_bangladesh_produces_a_shop_that_can_trade() {
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
+
+        let outlet = till.outlet().expect("configured");
+        assert_eq!(outlet.currency, BDT);
+        assert_eq!(outlet.regime, sahl_core::outlet::FiscalRegime::BdMushak);
+        assert!(outlet.scale.is_some(), "a grocery weighs things");
+        assert_eq!(outlet.validate(), Ok(()), "it can issue documents");
+        assert_eq!(till.catalogue().sellable().len(), 8);
+    }
+
+    #[test]
+    fn seeding_the_gulf_produces_a_cafe_that_can_trade() {
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Gulf, at(0)).expect("seeds");
+
+        let outlet = till.outlet().expect("configured");
+        assert_eq!(outlet.currency, sahl_core::Currency::Sar);
+        assert_eq!(outlet.regime, sahl_core::outlet::FiscalRegime::Zatca);
+        assert_eq!(outlet.validate(), Ok(()));
+        assert_eq!(till.floor().in_service().len(), 6, "a café has a floor");
+    }
+
+    #[test]
+    fn everyone_seeded_can_actually_sign_in() {
+        // The demo PIN is printed on the settings screen. If it did not work the whole thing would
+        // be a shop nobody can get into.
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Gulf, at(0)).expect("seeds");
+
+        let people: Vec<Uuid> = till.staff().active().iter().map(|m| m.id).collect();
+        assert_eq!(people.len(), 4);
+        for who in people {
+            assert!(
+                till.sign_in(who, crate::seed::DEMO_PIN, at(1)).is_ok(),
+                "{who} could not sign in"
+            );
+        }
+    }
+
+    #[test]
+    fn a_seeded_weight_label_scans_against_the_seeded_catalogue() {
+        // The scale layout and the item code have to agree, and they are written in two different
+        // places in the seed. This is the test that keeps them agreeing.
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
+
+        // Prefix 20, item 12345, 1.250 kg — plus the EAN-13 check digit.
+        let twelve = "201234501250";
+        let mut sum: u32 = 0;
+        for (index, character) in twelve.chars().enumerate() {
+            let digit = character.to_digit(10).expect("digits");
+            sum = sum.saturating_add(digit.saturating_mul(if index % 2 == 0 { 1 } else { 3 }));
+        }
+        let barcode = format!("{twelve}{}", (10_u32.saturating_sub(sum % 10)) % 10);
+
+        let scanned = till.scan(&barcode).expect("scans").expect("found");
+        assert_eq!(scanned.quantity, Quantity::from_milli(1_250));
+    }
+
+    #[test]
+    fn a_seeded_cafe_routes_its_food_and_drinks_to_different_stations() {
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Gulf, at(0)).expect("seeds");
+
+        let stations: std::collections::BTreeSet<_> = till
+            .catalogue()
+            .sellable()
+            .iter()
+            .filter_map(|product| product.station)
+            .collect();
+
+        assert!(
+            stations.len() >= 3,
+            "a café has more than one place to make things"
+        );
+    }
+
+    #[test]
+    fn a_seeded_shop_reports_no_anomalies_on_its_first_day() {
+        // Demo data that arrived pre-flagged would teach an owner to ignore the feed.
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
+
+        assert!(till.anomalies().expect("scans").is_empty());
+    }
+
+    #[test]
+    fn an_unknown_market_is_refused_rather_than_defaulted() {
+        // Seeding the wrong country's tax setup would be discovered on a challan.
+        assert!(crate::seed::Market::from_label("france").is_err());
+    }
+
     #[test]
     fn the_challan_takes_its_unit_of_supply_from_the_catalogue() {
         // The reason the catalogue had to exist before a challan could be right: every line printed

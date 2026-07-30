@@ -28,6 +28,8 @@ pub mod commands;
 pub mod devbridge;
 pub mod enrollment;
 pub mod printer;
+#[cfg(debug_assertions)]
+pub mod seed;
 pub mod store;
 pub mod sync;
 pub mod terminal;
@@ -145,6 +147,9 @@ pub fn run() {
             commands::staff_list,
             commands::sign_in,
             commands::current_session,
+            commands::can_seed,
+            #[cfg(debug_assertions)]
+            commands::seed_demo,
             commands::sign_out,
             commands::enrol_staff,
             commands::audit_feed,
