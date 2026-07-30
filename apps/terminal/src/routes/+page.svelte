@@ -609,7 +609,7 @@
 				</div>
 			</Card>
 
-			<div class="flex min-h-0 flex-col gap-3">
+			<div class="flex min-h-0 flex-col gap-3 overflow-y-auto">
 				{#if showTickets}
 					<Card label="Open tickets" flush>
 						<div class="max-h-64 overflow-y-auto">
@@ -661,10 +661,13 @@
 					</Card>
 				{/if}
 
+				<!-- A floor, not just a share. `flex-1` alone let the payment controls squeeze the
+				     lines to nothing — the cart scrolled out of sight entirely, which is the one thing
+				     on this screen a cashier is always reading. -->
 				<Card
 					label="Sale"
 					flush
-					class="flex min-h-0 flex-1 flex-col"
+					class="flex min-h-[16rem] flex-1 flex-col"
 					bodyClass="flex min-h-0 flex-1 flex-col overflow-hidden"
 				>
 					<div class="flex min-h-0 flex-1 flex-col">
@@ -717,6 +720,48 @@
 									</div>
 								{/each}
 							</div>
+
+							{#if pendingTickets.length > 0}
+								<!-- Beside the order rather than inside Payment: firing a course is something
+								     you do to the order, and it was crushing the lines off the screen from
+								     there. A summary, not a second copy of the cart — the lines are directly
+								     above, and repeating them is how the panel got too tall to read. -->
+								<div
+									class="border-primary bg-primary-subtle flex shrink-0 flex-wrap items-center
+									       gap-x-3 gap-y-2 border-t p-3"
+								>
+									<div class="min-w-0 flex-1">
+										<div class="flex items-baseline gap-2">
+											<span class="label-caps">Not sent yet</span>
+											<span class="text-secondary text-text-secondary">
+												Round {format.integer(pendingTickets[0].round)}
+											</span>
+										</div>
+										<p class="text-secondary text-text-secondary mt-0.5">
+											{pendingTickets
+												.map(
+													(ticket) =>
+														`${ticket.station}${ticket.kind === 'cancellation' ? ' (cancel)' : ''} ${ticket.lines.length}`
+												)
+												.join(' · ')}
+										</p>
+									</div>
+
+									<Button variant="primary" onclick={fireKitchen} disabled={busy}>
+										Send to kitchen
+									</Button>
+								</div>
+							{:else if fireOutcome && !fireOutcome.printed}
+								<!-- The order is recorded either way. Rolling it back on a print failure would
+								     let the next press resend lines a station may already have. -->
+								<div class="border-warn bg-warn-subtle text-warn-text shrink-0 border-t p-3">
+									<p class="label-caps">Sent, but not printed</p>
+									<p class="text-secondary mt-1">{fireOutcome.reason}</p>
+									<p class="text-secondary mt-1">
+										The order is recorded — tell the station directly rather than sending again.
+									</p>
+								</div>
+							{/if}
 
 							<div class="border-border bg-surface-sunken shrink-0 border-t p-3">
 								<!-- One grid, not one per row. Separate grids size their `auto` columns
@@ -809,50 +854,6 @@
 									/>
 								{/snippet}
 							</Field>
-							{#if pendingTickets.length > 0}
-								<div class="border-primary bg-primary-subtle mb-2 flex flex-col gap-2 border p-3">
-									<div class="flex items-baseline justify-between gap-2">
-										<span class="label-caps">Not sent yet</span>
-										<span class="text-secondary text-text-secondary">
-											Round {format.integer(pendingTickets[0].round)}
-										</span>
-									</div>
-
-									{#each pendingTickets as ticket (ticket.station + ticket.kind)}
-										<div class="flex flex-col gap-0.5">
-											<span class="text-secondary font-medium">
-												{ticket.station}
-												{#if ticket.kind === 'cancellation'}
-													— cancel
-												{/if}
-											</span>
-											{#each ticket.lines as ticketLine (ticketLine.name + ticketLine.modifiers.join())}
-												<span class="text-secondary text-text-secondary">
-													{format.quantity(ticketLine.quantityMilli)} × {ticketLine.name}{ticketLine
-														.modifiers.length > 0
-														? ` (${ticketLine.modifiers.join(', ')})`
-														: ''}
-												</span>
-											{/each}
-										</div>
-									{/each}
-
-									<Button variant="primary" block onclick={fireKitchen} disabled={busy}>
-										Send to kitchen
-									</Button>
-								</div>
-							{:else if fireOutcome && !fireOutcome.printed}
-								<!-- The order is recorded either way. Rolling it back on a print failure would
-								     let the next press resend lines a station may already have. -->
-								<div class="border-warn bg-warn-subtle text-warn-text mb-2 border p-3">
-									<p class="label-caps">Sent, but not printed</p>
-									<p class="text-secondary mt-1">{fireOutcome.reason}</p>
-									<p class="text-secondary mt-1">
-										The order is recorded — tell the station directly rather than sending again.
-									</p>
-								</div>
-							{/if}
-
 							{#if split}
 								<div class="border-border bg-surface-sunken mb-2 flex flex-col gap-2 border p-3">
 									<div class="flex items-baseline justify-between">
