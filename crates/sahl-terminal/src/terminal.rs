@@ -598,6 +598,7 @@ impl Terminal {
             sahl_core::outlet::FiscalRegime::BdMushak => {
                 sahl_fiscal::bd_mushak::BdMushak.issue(&invoice)?
             }
+            sahl_core::outlet::FiscalRegime::Zatca => sahl_fiscal::zatca::Zatca.issue(&invoice)?,
             _ => sahl_fiscal::noop::NoFiscalRegime.issue(&invoice)?,
         })
     }
@@ -695,6 +696,12 @@ impl Terminal {
                 .collect(),
             change: sale.change_due().ok().filter(|change| !change.is_zero()),
             footer: None,
+            // Only where the jurisdiction asks for one. Built from the same document that would be
+            // issued, so the paper and the record cannot state different totals.
+            qr: match self.fiscal_document(sale_id) {
+                Ok(sahl_fiscal::Document::Zatca(document)) => Some(document.qr.clone()),
+                _ => None,
+            },
         })
     }
 
@@ -2239,12 +2246,16 @@ mod tests {
     // ------------------------------------------------------------------------------------------
 
     fn ring_up(till: &mut Terminal, base: u128, minor: i64) {
+        ring_up_in(till, base, minor, BDT);
+    }
+
+    fn ring_up_in(till: &mut Terminal, base: u128, minor: i64, currency: sahl_core::Currency) {
         let sale = id(base);
         till.record(
             &SaleEvent::Opened {
                 sale_id: sale,
                 opened_by: id(CASHIER),
-                currency: BDT,
+                currency,
                 pricing_mode: PricingMode::TaxInclusive,
                 rounding: Rounding::HalfUp,
             },
@@ -2258,7 +2269,7 @@ mod tests {
                 line_id: id(base + 2),
                 product_id: id(12),
                 name: "Rice 5kg".to_owned(),
-                unit_price: Money::from_minor(minor, BDT),
+                unit_price: Money::from_minor(minor, currency),
                 quantity: Quantity::ONE,
                 tax_class: TaxClass::standard(1500),
                 modifiers: Vec::new(),
@@ -2272,7 +2283,7 @@ mod tests {
                 sale_id: sale,
                 tender_id: id(base + 4),
                 method: TenderMethod::Cash,
-                amount: Money::from_minor(minor, BDT),
+                amount: Money::from_minor(minor, currency),
                 reference: None,
             },
             id(base + 5),
@@ -2282,14 +2293,24 @@ mod tests {
     }
 
     fn settle(till: &mut Terminal, base: u128, minor: i64) -> sahl_core::ledger::InvoiceSeal {
+        settle_in(till, base, minor, BDT, "bd_mushak")
+    }
+
+    fn settle_in(
+        till: &mut Terminal,
+        base: u128,
+        minor: i64,
+        currency: sahl_core::Currency,
+        regime: &str,
+    ) -> sahl_core::ledger::InvoiceSeal {
         till.complete_sale(
             &SaleEvent::Completed {
                 sale_id: id(base),
-                total: Money::from_minor(minor, BDT),
-                change_given: Money::from_minor(0, BDT),
+                total: Money::from_minor(minor, currency),
+                change_given: Money::from_minor(0, currency),
                 at: at(3),
             },
-            "bd_mushak",
+            regime,
             id(CASHIER),
             at(3),
         )
@@ -2734,7 +2755,7 @@ mod tests {
                 change_given: Money::from_minor(0, BDT),
                 at: at(3),
             },
-            till.regime(),
+            "bd_mushak",
             id(CASHIER),
             at(3),
         )
@@ -3058,6 +3079,57 @@ mod tests {
         // A loyalty card, a coupon, a competitor's packaging — all scanned at a counter daily.
         let till = fresh();
         assert_eq!(till.scan("8901234567895").expect("scans"), None);
+    }
+
+    #[test]
+    fn a_saudi_outlet_issues_a_simplified_invoice_with_a_qr() {
+        let mut till = fresh();
+        till.record_outlet(
+            &configure(sahl_core::outlet::OutletSettings {
+                currency: sahl_core::Currency::Sar,
+                timezone: "Asia/Riyadh".to_owned(),
+                regime: sahl_core::outlet::FiscalRegime::Zatca,
+                tax_registration: Some("300000000000003".to_owned()),
+                ..outlet_settings()
+            }),
+            id(50),
+            at(0),
+        )
+        .expect("configures");
+
+        ring_up_in(&mut till, 0x100, 11_500, sahl_core::Currency::Sar);
+        settle_in(&mut till, 0x100, 11_500, sahl_core::Currency::Sar, "zatca");
+
+        let sahl_fiscal::Document::Zatca(document) =
+            till.fiscal_document(id(0x100)).expect("builds")
+        else {
+            panic!("expected a ZATCA invoice");
+        };
+
+        assert_eq!(document.seller_vat, "300000000000003");
+        assert!(!document.qr.is_empty());
+
+        // The receipt carries the same payload. Two computations of it would be two chances to
+        // disagree with the paper already handed to the customer.
+        let receipt = till.receipt(id(0x100), "now".to_owned()).expect("builds");
+        assert_eq!(receipt.qr.as_deref(), Some(document.qr.as_str()));
+    }
+
+    #[test]
+    fn a_bangladeshi_receipt_carries_no_qr() {
+        // A QR nobody's jurisdiction asks for is ink and paper spent on nothing.
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        assert_eq!(
+            till.receipt(id(0x100), "now".to_owned())
+                .expect("builds")
+                .qr,
+            None
+        );
     }
 
     #[test]

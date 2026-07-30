@@ -40,6 +40,11 @@
 			value: 'bd_mushak',
 			label: 'Bangladesh — Mushak 6.3',
 			note: 'Issues a VAT challan against every sale. Needs a BIN.'
+		},
+		{
+			value: 'zatca',
+			label: 'Saudi Arabia — ZATCA Phase 1',
+			note: 'Puts a QR code on every receipt. Needs a 15-digit VAT number beginning and ending with 3.'
 		}
 	];
 
@@ -70,7 +75,7 @@
 	let pendingSave = $state(false);
 	let approvalError = $state<string | null>(null);
 
-	let needsRegistration = $derived(regime === 'bd_mushak');
+	let needsRegistration = $derived(regime !== 'none');
 	let firstSetup = $derived(outlet === null);
 
 	async function run<T>(action: () => Promise<T>, onDone?: (result: T) => void) {
@@ -140,7 +145,10 @@
 			return;
 		}
 		if (needsRegistration && !taxRegistration.trim()) {
-			error = { code: 'bad_bin', message: 'Mushak 6.3 needs a BIN before it can issue anything' };
+			error = {
+				code: 'bad_registration',
+				message: `${REGIMES.find((entry) => entry.value === regime)?.label} needs a registration number before it can issue anything`
+			};
 			return;
 		}
 
@@ -395,8 +403,10 @@
 						{#if needsRegistration}
 							<Field
 								id="outlet-bin"
-								label="BIN"
-								hint="The 13-digit Business Identification Number. Printed on every challan."
+								label={regime === 'zatca' ? 'VAT registration number' : 'BIN'}
+								hint={regime === 'zatca'
+									? '15 digits, beginning and ending with 3. Goes on the face of every invoice and inside the QR.'
+									: 'The 13-digit Business Identification Number. Printed on every challan.'}
 							>
 								{#snippet children({ id, describedBy })}
 									<Input
@@ -405,7 +415,7 @@
 										bind:value={taxRegistration}
 										numeric
 										forceLtr
-										placeholder="0031234567890"
+										placeholder={regime === 'zatca' ? '300000000000003' : '0031234567890'}
 									/>
 								{/snippet}
 							</Field>

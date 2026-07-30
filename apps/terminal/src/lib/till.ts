@@ -186,7 +186,7 @@ export interface OutletView {
 	profile: 'retail' | 'cafe' | 'grocery';
 	currency: string;
 	timezone: string;
-	regime: 'none' | 'bd_mushak';
+	regime: 'none' | 'bd_mushak' | 'zatca';
 	taxRegistration: string | null;
 	address: string;
 	configuredAt: number;
@@ -247,7 +247,33 @@ export type DocumentView =
 			totalVatMinor: number;
 			totalWithTaxMinor: number;
 	  }
+	| {
+			regime: 'zatca';
+			sellerName: string;
+			sellerVat: string;
+			issuingAddress: string;
+			invoiceNumber: string;
+			issuedAtMillis: number;
+			lines: ZatcaLineView[];
+			totalExcludingVatMinor: number;
+			totalVatMinor: number;
+			totalWithVatMinor: number;
+			/** Base64 TLV. The till decides the payload; a screen only draws the symbol. */
+			qr: string;
+	  }
 	| { regime: 'none' };
+
+/** One line of a ZATCA simplified invoice, stated excluding VAT. */
+export interface ZatcaLineView {
+	description: string;
+	unit: string;
+	quantityMilli: number;
+	unitPriceMinor: number;
+	lineTotalMinor: number;
+	vatRateBasisPoints: number;
+	vatAmountMinor: number;
+	totalWithVatMinor: number;
+}
 
 /** What happened when a receipt was sent to a printer. */
 export interface PrintOutcome {

@@ -46,6 +46,9 @@ pub struct ReceiptData {
     pub tenders: Vec<(String, Money)>,
     pub change: Option<Money>,
     pub footer: Option<String>,
+    /// The ZATCA QR payload, already base64. Absent under every other regime — a QR nobody's
+    /// jurisdiction asks for is ink and paper spent on nothing.
+    pub qr: Option<String>,
 }
 
 /// A rendered receipt, ready to write to a device.
@@ -227,6 +230,16 @@ impl Document {
         // Footer
         out.extend(line(&rule(width, '-')));
         out.extend(command::align(Align::Center));
+
+        // A ZATCA simplified invoice is not compliant without this, so it goes above the footer
+        // where a torn-off receipt still carries it.
+        if let Some(payload) = &data.qr
+            && let Ok(bytes) = command::qr(payload.as_bytes(), 5)
+        {
+            out.extend(bytes);
+            out.extend(line(""));
+        }
+
         if let Some(footer) = &data.footer {
             out.extend(line(footer));
         }
@@ -342,6 +355,7 @@ mod tests {
             tenders: vec![("Cash".to_owned(), bdt(60_000))],
             change: Some(bdt(2_128)),
             footer: Some("Thank you".to_owned()),
+            qr: None,
         }
     }
 

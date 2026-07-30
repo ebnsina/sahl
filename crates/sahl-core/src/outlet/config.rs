@@ -38,6 +38,8 @@ pub enum FiscalRegime {
     None,
     /// Bangladesh — Mushak 6.3.
     BdMushak,
+    /// Saudi Arabia — ZATCA, Phase 1.
+    Zatca,
 }
 
 impl FiscalRegime {
@@ -46,13 +48,14 @@ impl FiscalRegime {
         match self {
             Self::None => "none",
             Self::BdMushak => "bd_mushak",
+            Self::Zatca => "zatca",
         }
     }
 
     /// Whether this regime needs a tax registration number before it can issue anything.
     #[must_use]
     pub const fn needs_registration(self) -> bool {
-        matches!(self, Self::BdMushak)
+        matches!(self, Self::BdMushak | Self::Zatca)
     }
 
     /// Parse a stored or transmitted label.
@@ -64,6 +67,7 @@ impl FiscalRegime {
         match label {
             "none" => Ok(Self::None),
             "bd_mushak" => Ok(Self::BdMushak),
+            "zatca" => Ok(Self::Zatca),
             other => Err(OutletError::UnknownRegime(other.to_owned())),
         }
     }

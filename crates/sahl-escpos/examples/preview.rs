@@ -64,6 +64,7 @@ fn main() {
         tenders: vec![("Cash".into(), bdt(70_000))],
         change: Some(bdt(4_128)),
         footer: Some("Thank you".into()),
+        qr: None,
     };
 
     for paper in [PaperWidth::Mm58, PaperWidth::Mm80] {

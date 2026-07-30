@@ -943,6 +943,21 @@
 										{document.sellerName} · BIN {document.sellerBin}
 									</p>
 								</div>
+							{:else if document?.regime === 'zatca'}
+								<div class="border-border bg-surface-sunken border p-3">
+									<p class="label-caps">Simplified tax invoice</p>
+									<div class="mt-1 flex items-baseline justify-between gap-3">
+										<span class="text-secondary text-text-secondary">Invoice no.</span>
+										<Numeric value={document.invoiceNumber} class="font-semibold" />
+									</div>
+									<p class="text-secondary text-text-muted mt-1">
+										{document.sellerName} · VAT {document.sellerVat}
+									</p>
+									<p class="text-secondary text-text-muted mt-1">
+										The QR goes on the printed receipt — the till decides its bytes, so a screen
+										redrawing it could disagree with the paper.
+									</p>
+								</div>
 							{:else if documentProblem}
 								<!-- The sale already went through. This says the challan could not be issued,
 								     which is a thing to fix, not a thing to have refused the sale over. -->

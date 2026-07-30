@@ -96,6 +96,65 @@ pub const CODE_PAGE_CP437: u8 = 0;
 /// CP864, Arabic. Supported on many but not all printers — verify against the actual device.
 pub const CODE_PAGE_CP864: u8 = 22;
 
+/// Print a QR code — the ZATCA simplified invoice is not compliant without one.
+///
+/// Model 2, error correction M. The payload is base64, so every byte is ASCII and no code page
+/// applies: `GS ( k` takes raw bytes and the printer's own encoder builds the symbol.
+///
+/// # Errors
+/// [`QrError`] if the payload is empty or longer than the store command can describe.
+pub fn qr(payload: &[u8], module_size: u8) -> Result<Vec<u8>, QrError> {
+    if payload.is_empty() {
+        return Err(QrError::Empty);
+    }
+    // The store command's length covers three header bytes on top of the payload, and the whole
+    // thing is described by two bytes.
+    let described =
+        u16::try_from(payload.len().saturating_add(3)).map_err(|_| QrError::TooLong {
+            length: payload.len(),
+        })?;
+    if payload.len() > 7_089 {
+        return Err(QrError::TooLong {
+            length: payload.len(),
+        });
+    }
+
+    let size = module_size.clamp(1, 16);
+    let mut out = Vec::with_capacity(payload.len().saturating_add(20));
+
+    // GS ( k — select model 2.
+    out.extend_from_slice(&[GS, b'(', b'k', 4, 0, 49, 65, 50, 0]);
+    // Module size in dots. Too small and a phone camera cannot read it off thermal paper.
+    out.extend_from_slice(&[GS, b'(', b'k', 3, 0, 49, 67, size]);
+    // Error correction M — 15%, the usual choice for a receipt that will be creased.
+    out.extend_from_slice(&[GS, b'(', b'k', 3, 0, 49, 69, 49]);
+    // Store the payload.
+    out.extend_from_slice(&[
+        GS,
+        b'(',
+        b'k',
+        (described & 0xFF) as u8,
+        (described >> 8) as u8,
+        49,
+        80,
+        48,
+    ]);
+    out.extend_from_slice(payload);
+    // Print what was stored.
+    out.extend_from_slice(&[GS, b'(', b'k', 3, 0, 49, 81, 48]);
+
+    Ok(out)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum QrError {
+    #[error("a QR code needs a payload")]
+    Empty,
+
+    #[error("a QR payload is at most 7089 bytes, got {length}")]
+    TooLong { length: usize },
+}
+
 /// Print a 1-bit bitmap — the only way scripts the code tables miss reach paper.
 ///
 /// `width_px` must be a multiple of 8: eight pixels per byte, MSB leftmost, set bit = black.
@@ -154,6 +213,52 @@ pub enum RasterError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_qr_selects_model_two_stores_the_payload_and_prints_it() {
+        let bytes = qr(b"HELLO", 5).expect("encodes");
+
+        // Model 2, module size, error correction, store, print — in that order.
+        assert!(bytes.starts_with(&[GS, b'(', b'k', 4, 0, 49, 65, 50, 0]));
+        assert!(bytes.ends_with(&[GS, b'(', b'k', 3, 0, 49, 81, 48]));
+        assert!(
+            bytes.windows(5).any(|w| w == b"HELLO"),
+            "the payload reaches the printer"
+        );
+    }
+
+    #[test]
+    fn the_store_length_covers_the_payload_and_its_three_header_bytes() {
+        // Off by one here and the printer either truncates the payload or waits forever for
+        // bytes that never come — and the QR on the paper is silently wrong either way.
+        let bytes = qr(b"HELLO", 5).expect("encodes");
+        let index = bytes
+            .windows(8)
+            .position(|w| w[5] == 49 && w[6] == 80 && w[7] == 48 && w[0] == GS)
+            .expect("store command");
+        let described = u16::from(bytes[index + 3]) | (u16::from(bytes[index + 4]) << 8);
+        assert_eq!(described, 5 + 3);
+    }
+
+    #[test]
+    fn an_empty_payload_is_refused() {
+        assert_eq!(qr(b"", 5), Err(QrError::Empty));
+    }
+
+    #[test]
+    fn a_payload_longer_than_the_symbol_holds_is_refused() {
+        let long = vec![b'A'; 7_090];
+        assert!(matches!(qr(&long, 5), Err(QrError::TooLong { .. })));
+    }
+
+    #[test]
+    fn a_module_size_outside_the_printers_range_is_clamped_rather_than_rejected() {
+        // A refused receipt over a cosmetic setting would stop a sale.
+        let small = qr(b"HELLO", 0).expect("encodes");
+        let large = qr(b"HELLO", 99).expect("encodes");
+        assert_eq!(small[16], 1);
+        assert_eq!(large[16], 16);
+    }
+
     use super::*;
 
     #[test]

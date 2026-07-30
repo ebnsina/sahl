@@ -1500,8 +1500,36 @@ pub enum DocumentView {
         total_vat_minor: i64,
         total_with_tax_minor: i64,
     },
+    /// Saudi Arabia: the simplified tax invoice, Phase 1.
+    Zatca {
+        seller_name: String,
+        seller_vat: String,
+        issuing_address: String,
+        invoice_number: String,
+        issued_at_millis: i64,
+        lines: Vec<ZatcaLineView>,
+        total_excluding_vat_minor: i64,
+        total_vat_minor: i64,
+        total_with_vat_minor: i64,
+        /// Base64 TLV. The screen draws the symbol; the payload is decided here.
+        qr: String,
+    },
     /// No regime configured. An ordinary receipt is the whole obligation.
     None,
+}
+
+/// One line of a ZATCA simplified invoice, stated excluding VAT.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZatcaLineView {
+    pub description: String,
+    pub unit: String,
+    pub quantity_milli: i64,
+    pub unit_price_minor: i64,
+    pub line_total_minor: i64,
+    pub vat_rate_basis_points: i32,
+    pub vat_amount_minor: i64,
+    pub total_with_vat_minor: i64,
 }
 
 /// The fiscal document for a completed sale.
@@ -1545,6 +1573,31 @@ pub fn fiscal_document(
             total_value_minor: challan.total_value.minor(),
             total_vat_minor: challan.total_vat.minor(),
             total_with_tax_minor: challan.total_with_tax.minor(),
+        },
+        sahl_fiscal::Document::Zatca(document) => DocumentView::Zatca {
+            seller_name: document.seller_name.clone(),
+            seller_vat: document.seller_vat.clone(),
+            issuing_address: document.issuing_address.clone(),
+            invoice_number: document.invoice_number.clone(),
+            issued_at_millis: document.issued_at_millis,
+            lines: document
+                .lines
+                .iter()
+                .map(|line| ZatcaLineView {
+                    description: line.description.clone(),
+                    unit: line.unit.clone(),
+                    quantity_milli: line.quantity_milli,
+                    unit_price_minor: line.unit_price.minor(),
+                    line_total_minor: line.line_total.minor(),
+                    vat_rate_basis_points: line.vat_rate_basis_points,
+                    vat_amount_minor: line.vat_amount.minor(),
+                    total_with_vat_minor: line.total_with_vat.minor(),
+                })
+                .collect(),
+            total_excluding_vat_minor: document.total_excluding_vat.minor(),
+            total_vat_minor: document.total_vat.minor(),
+            total_with_vat_minor: document.total_with_vat.minor(),
+            qr: document.qr.clone(),
         },
         _ => DocumentView::None,
     })

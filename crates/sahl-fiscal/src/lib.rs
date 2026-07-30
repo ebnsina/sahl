@@ -23,6 +23,7 @@
 
 pub mod bd_mushak;
 pub mod noop;
+pub mod zatca;
 
 use sahl_core::money::MoneyError;
 use sahl_core::tax::OrderTotals;
@@ -124,6 +125,8 @@ pub enum Document {
     /// Boxed: a challan carries ten columns per line, and leaving it inline would make every
     /// `Document` — including `None` — as large as the largest regime ever added.
     BdMushak63(Box<bd_mushak::Mushak63>),
+    /// Saudi Arabia: the simplified tax invoice, Phase 1.
+    Zatca(Box<zatca::SimplifiedTaxInvoice>),
     /// No fiscal regime configured. An ordinary receipt is the whole obligation.
     None,
 }
