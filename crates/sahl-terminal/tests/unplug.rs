@@ -141,12 +141,22 @@ fn ring_sale(terminal: &mut Terminal, n: u32) -> i64 {
         amount: Money::from_minor(total, BDT),
         reference: None,
     });
-    record(&SaleEvent::Completed {
-        sale_id,
-        total: Money::from_minor(total, BDT),
-        change_given: Money::from_minor(0, BDT),
-        at: Timestamp::from_millis(clock + 4),
-    });
+    // Through `complete_sale`, not `record`. That is the path the app takes, and it is the one that
+    // also seals an invoice into the fiscal chain — testing the old path would leave the whole
+    // fiscal ledger unexercised by the one test the plan calls "the demo that sells".
+    terminal
+        .complete_sale(
+            &SaleEvent::Completed {
+                sale_id,
+                total: Money::from_minor(total, BDT),
+                change_given: Money::from_minor(0, BDT),
+                at: Timestamp::from_millis(clock + 4),
+            },
+            "none",
+            Uuid::nil(),
+            Timestamp::from_millis(clock + 4),
+        )
+        .expect("completes");
 
     total
 }
@@ -224,8 +234,8 @@ async fn a_till_sells_through_an_outage_and_reconciles_exactly() {
     );
     assert_eq!(
         store.unsynced_count().expect("count"),
-        200,
-        "4 events per sale"
+        250,
+        "5 events per sale — the fourth is the completion, the fifth its invoice"
     );
 
     // A failed sync while still offline must change nothing.
@@ -240,7 +250,7 @@ async fn a_till_sells_through_an_outage_and_reconciles_exactly() {
     assert!(result.is_err(), "no server, no sync");
     assert_eq!(
         store.unsynced_count().expect("count"),
-        200,
+        250,
         "a failed sync leaves the queue untouched"
     );
 
@@ -262,7 +272,7 @@ async fn a_till_sells_through_an_outage_and_reconciles_exactly() {
     );
     assert_eq!(
         stored_events(&shop.pool, shop.identity).await,
-        200,
+        250,
         "zero loss, zero duplicates"
     );
 
@@ -277,7 +287,7 @@ async fn a_till_sells_through_an_outage_and_reconciles_exactly() {
     assert_eq!(result.expect("syncs").pushed, 0);
     assert_eq!(
         stored_events(&shop.pool, shop.identity).await,
-        200,
+        250,
         "a repeat sync must not duplicate"
     );
 
@@ -331,7 +341,11 @@ async fn selling_during_a_sync_loses_nothing() {
         3,
     );
     result.expect("first sync");
-    assert_eq!(stored_events(&shop.pool, shop.identity).await, 12);
+    assert_eq!(
+        stored_events(&shop.pool, shop.identity).await,
+        15,
+        "three sales at five events each"
+    );
 
     // The shop keeps trading after the sync.
     let mut terminal = Terminal::load(store, shop.identity).expect("reloads");
@@ -348,7 +362,7 @@ async fn selling_during_a_sync_loses_nothing() {
     result.expect("second sync");
     assert_eq!(
         stored_events(&shop.pool, shop.identity).await,
-        16,
+        20,
         "the later sale arrived too"
     );
 }
@@ -392,4 +406,82 @@ async fn a_revoked_till_is_refused_and_does_not_retry() {
         other => panic!("expected a refusal, got {other:?}"),
     }
     assert_eq!(stored_events(&shop.pool, shop.identity).await, 0);
+}
+
+/// Fifty invoices issued offline form one unbroken chain, and the server receives it intact.
+///
+/// The fiscal sequence is the part a tax authority reads, and it is issued entirely offline — an
+/// outage is exactly when a gap or a broken link would be created and never noticed. Nothing else
+/// in the suite covers the chain surviving a real push.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_fiscal_chain_survives_an_outage_intact() {
+    let Some(pool) = pool().await else {
+        eprintln!("skipped: SAHL_TEST_DATABASE_URL not set");
+        return;
+    };
+    let shop = open_shop(&pool, 24).await;
+
+    let store = EventStore::open_in_memory(shop.identity.device_id).expect("store");
+    let mut terminal = Terminal::load(store, shop.identity).expect("loads");
+
+    for n in 0..50 {
+        ring_sale(&mut terminal, n);
+    }
+
+    // Numbered one to fifty with no gap. A gap is indistinguishable from a deleted sale, which is
+    // the accusation the counter exists to answer.
+    assert_eq!(terminal.fiscal_tip().counter, 50);
+
+    let (store, _) = terminal.into_parts();
+    let (store, result) = sync_on_thread(
+        store,
+        shop.base.clone(),
+        shop.identity.device_id,
+        shop.key.clone(),
+        10,
+    );
+    result.expect("syncs");
+    assert_eq!(store.unsynced_count().expect("count"), 0);
+
+    // The server holds every invoice, and the chain reassembles from what it stored.
+    let mut tx = db::begin_for_tenant(&shop.pool, shop.identity.tenant_id)
+        .await
+        .expect("tx");
+    let issued: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM event WHERE device_id = $1 AND kind = 'fiscal.invoice_issued'",
+    )
+    .bind(shop.identity.device_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("counts");
+    assert_eq!(issued.0, 50, "every invoice reached the server");
+
+    let payloads: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT payload FROM event WHERE device_id = $1 AND kind = 'fiscal.invoice_issued' \
+         ORDER BY device_seq",
+    )
+    .bind(shop.identity.device_id)
+    .fetch_all(&mut *tx)
+    .await
+    .expect("reads");
+
+    let mut previous: Option<String> = None;
+    for (index, (payload,)) in payloads.iter().enumerate() {
+        let seal = &payload["seal"];
+        let counter = seal["counter"].as_u64().expect("counter");
+        assert_eq!(
+            counter,
+            index as u64 + 1,
+            "invoice {counter} is out of sequence"
+        );
+
+        let previous_hash = seal["previous_hash"].as_str().expect("pih").to_owned();
+        if let Some(expected) = &previous {
+            assert_eq!(
+                &previous_hash, expected,
+                "invoice {counter} does not chain onto its predecessor"
+            );
+        }
+        previous = Some(seal["hash"].as_str().expect("hash").to_owned());
+    }
 }
