@@ -15,11 +15,16 @@
 
 use sahl_core::catalogue::{CatalogueEvent, ProductDetails, Unit};
 use sahl_core::floor::{FloorEvent, TableDetails};
+use sahl_core::inventory::InventoryEvent;
 use sahl_core::kitchen::Station;
 use sahl_core::money::{Currency, Money, Rate};
 use sahl_core::outlet::{FiscalRegime, OutletEvent, OutletSettings, Profile};
+use sahl_core::quantity::Quantity;
+use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason};
 use sahl_core::scale::{Embedded, ScaleFormat};
+use sahl_core::shift::ShiftEvent;
 use sahl_core::staff::{ApprovalPolicy, Role, StaffEvent, pin};
+use sahl_core::tax::{Discount, PricingMode};
 use sahl_core::time::Timestamp;
 use uuid::Uuid;
 
@@ -120,7 +125,233 @@ pub fn seed(till: &mut Terminal, market: Market, now: Timestamp) -> Result<(), T
         )?;
     }
 
+    stock(till, market, &mut clock)?;
+    trade(till, market, &mut clock)?;
+
     Ok(())
+}
+
+/// Put things on the shelf, so the stock screen has something to say.
+fn stock(till: &mut Terminal, market: Market, clock: &mut Clock) -> Result<(), TerminalError> {
+    let currency = settings(market).currency;
+
+    for (index, details) in products(market).into_iter().enumerate() {
+        // Cost is roughly two-thirds of the shelf price. Not a real margin for any of these
+        // products — it exists so the stock screen has a number, not so anybody plans on it.
+        let unit_cost = details
+            .price
+            .mul_ratio(2, 3, sahl_core::money::Rounding::HalfUp)
+            .unwrap_or(Money::from_minor(0, currency));
+
+        till.record_stock(
+            &InventoryEvent::BatchReceived {
+                batch_id: batch_id(market, index),
+                product_id: product_id(market, index),
+                lot: None,
+                expires_at: None,
+                quantity: Quantity::from_milli(40_000),
+                unit_cost,
+                supplier: Some(match market {
+                    Market::Bangladesh => "Dhaka Wholesale".to_owned(),
+                    Market::Gulf => "Olaya Supply Co.".to_owned(),
+                }),
+                at: clock.tick(),
+                received_by: staff_id(1),
+            },
+            Uuid::now_v7(),
+            clock.now(),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// A day's trading.
+///
+/// Enough sales that the per-cashier comparisons mean something — the anomaly scan ignores anybody
+/// with fewer than twenty, and demo data below that threshold would show an empty feed and teach
+/// nothing about it.
+///
+/// **Ruma voids noticeably more than Nasrin, deliberately.** The feed exists to surface exactly
+/// that shape, and a seed where everybody behaved identically would demonstrate a working feature
+/// by showing nothing at all. It is a pattern to ask about, not a verdict — which is the point the
+/// screen makes too.
+fn trade(till: &mut Terminal, market: Market, clock: &mut Clock) -> Result<(), TerminalError> {
+    let outlet = settings(market);
+    let currency = outlet.currency;
+    let regime = outlet.regime.label().to_owned();
+    let catalogue = products(market);
+
+    till.record_shift(
+        &ShiftEvent::Opened {
+            shift_id: Uuid::from_u128(0x5EED_0000_0000_4000),
+            opened_by: staff_id(2),
+            currency,
+            opening_float: Money::from_minor(50_000, currency),
+            at: clock.tick(),
+        },
+        Uuid::now_v7(),
+        clock.now(),
+    )?;
+
+    let mut rng = Lcg::new(0x5EED_5EED);
+
+    for ticket in 0_u32..52 {
+        // Alternating, so both cashiers clear the twenty-sale floor the scan needs.
+        let cashier = if ticket % 2 == 0 { 2 } else { 3 };
+        let sale = Uuid::from_u128(0x5EED_0000_0001_0000_u128.saturating_add(u128::from(ticket)));
+
+        till.record(
+            &SaleEvent::Opened {
+                sale_id: sale,
+                opened_by: staff_id(cashier),
+                currency,
+                pricing_mode: PricingMode::TaxInclusive,
+                rounding: sahl_core::money::Rounding::HalfUp,
+            },
+            Uuid::now_v7(),
+            clock.tick(),
+        )?;
+
+        let line_count = rng.below(4).saturating_add(1);
+        let mut lines = Vec::new();
+        for slot in 0..line_count {
+            let pick = usize::try_from(rng.below(u32::try_from(catalogue.len()).unwrap_or(1)))
+                .unwrap_or_default();
+            let Some(product) = catalogue.get(pick) else {
+                continue;
+            };
+            let line = Uuid::from_u128(
+                0x5EED_0000_0002_0000_u128
+                    .saturating_add(u128::from(ticket).saturating_mul(16))
+                    .saturating_add(u128::from(slot)),
+            );
+
+            till.record(
+                &SaleEvent::LineAdded {
+                    sale_id: sale,
+                    line_id: line,
+                    product_id: product_id(market, pick),
+                    name: product.name.clone(),
+                    unit_price: product.price,
+                    quantity: Quantity::from_milli(if product.unit.is_divisible() {
+                        250_i64.saturating_add(i64::from(rng.below(8)).saturating_mul(250))
+                    } else {
+                        1_000_i64.saturating_add(i64::from(rng.below(2)).saturating_mul(1_000))
+                    }),
+                    tax_class: product.tax_class,
+                    modifiers: Vec::new(),
+                },
+                Uuid::now_v7(),
+                clock.tick(),
+            )?;
+            lines.push(line);
+        }
+
+        // Ruma strikes off roughly one line in three; Nasrin one in twelve. Both void — a seed
+        // where only one person ever did would demonstrate the detector noticing the *only* one,
+        // which is its weakest branch, rather than the rate comparison that is the actual feature.
+        let voids_often = cashier == 2;
+        if lines.len() > 1 && rng.below(if voids_often { 3 } else { 12 }) == 0 {
+            let victim = lines.remove(0);
+            till.record(
+                &SaleEvent::LineVoided {
+                    sale_id: sale,
+                    line_id: victim,
+                    reason: VoidReason::CustomerChanged,
+                    // Inside the void limit, so the cashier is their own approver — which is what
+                    // the threshold is for and what the feed must not mistake for a bypass.
+                    authorized_by: staff_id(cashier),
+                },
+                Uuid::now_v7(),
+                clock.tick(),
+            )?;
+        }
+
+        if lines.is_empty() {
+            continue;
+        }
+
+        // Every eleventh ticket gets a small discount, inside what a cashier may give.
+        if ticket % 11 == 0 {
+            till.record(
+                &SaleEvent::OrderDiscounted {
+                    sale_id: sale,
+                    discount: Discount::Amount {
+                        amount: Money::from_minor(200, currency),
+                    },
+                    authorized_by: staff_id(cashier),
+                },
+                Uuid::now_v7(),
+                clock.tick(),
+            )?;
+        }
+
+        // Two tickets are left open, because a real café always has some.
+        if market == Market::Gulf && ticket >= 50 {
+            continue;
+        }
+
+        let total = till.sale(sale)?.totals()?.total;
+        till.record(
+            &SaleEvent::TenderRecorded {
+                sale_id: sale,
+                tender_id: Uuid::now_v7(),
+                method: if ticket % 3 == 0 {
+                    TenderMethod::Card
+                } else {
+                    TenderMethod::Cash
+                },
+                amount: total,
+                reference: None,
+            },
+            Uuid::now_v7(),
+            clock.tick(),
+        )?;
+
+        till.complete_sale(
+            &SaleEvent::Completed {
+                sale_id: sale,
+                total,
+                change_given: Money::from_minor(0, currency),
+                at: clock.tick(),
+            },
+            &regime,
+            staff_id(cashier),
+            clock.now(),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// A tiny linear congruential generator.
+///
+/// Not for security — for a basket that looks like a basket. Seeded by a constant so the demo shop
+/// is the same shop every time; `rand` would make two seedings of "the same" data differ, and the
+/// first thing anybody does with demo data is compare two screens showing it.
+struct Lcg {
+    state: u64,
+}
+
+impl Lcg {
+    const fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn below(&mut self, bound: u32) -> u32 {
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        if bound == 0 {
+            return 0;
+        }
+        u32::try_from(self.state >> 33)
+            .unwrap_or_default()
+            .checked_rem(bound)
+            .unwrap_or_default()
+    }
 }
 
 /// A monotonic clock for the seed, so every event has its own instant.
@@ -344,6 +575,18 @@ fn product_id(market: Market, index: usize) -> Uuid {
     let market_offset: u128 = match market {
         Market::Bangladesh => 0x1000,
         Market::Gulf => 0x2000,
+    };
+    Uuid::from_u128(
+        0x5EED_0000_0000_0000_u128
+            .saturating_add(market_offset)
+            .saturating_add(index as u128),
+    )
+}
+
+fn batch_id(market: Market, index: usize) -> Uuid {
+    let market_offset: u128 = match market {
+        Market::Bangladesh => 0x5000,
+        Market::Gulf => 0x6000,
     };
     Uuid::from_u128(
         0x5EED_0000_0000_0000_u128

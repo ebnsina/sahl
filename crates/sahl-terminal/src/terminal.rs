@@ -3793,12 +3793,58 @@ mod tests {
     }
 
     #[test]
-    fn a_seeded_shop_reports_no_anomalies_on_its_first_day() {
-        // Demo data that arrived pre-flagged would teach an owner to ignore the feed.
+    fn the_seeded_day_gives_the_feed_exactly_one_thing_to_say() {
+        // The seed deliberately has one cashier voiding far more than the other, because a feed
+        // that showed nothing would demonstrate a working feature by being empty. What it must
+        // *not* produce is a self-approval alert: everything in the seed is inside the limits the
+        // seeded outlet sets, and flagging those would be the false-positive bug all over again.
         let mut till = fresh();
         crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
 
-        assert!(till.anomalies().expect("scans").is_empty());
+        let findings = till.anomalies().expect("scans");
+
+        assert!(
+            findings.iter().all(|f| f.kind != "self_approved"),
+            "everything seeded is within the limits: {findings:#?}"
+        );
+        let voids = findings
+            .iter()
+            .find(|f| f.kind == "void_rate_outlier")
+            .expect("the pattern the seed contains");
+        assert_eq!(
+            voids.person(),
+            Some(seeded_staff(2)),
+            "Ruma, by construction"
+        );
+    }
+
+    /// The seed's staff ids, so a test can name a person rather than a number.
+    fn seeded_staff(index: u128) -> Uuid {
+        Uuid::from_u128(0x5EED_0000_0000_0001_u128.saturating_add(index))
+    }
+
+    #[test]
+    fn a_seeded_day_leaves_a_shift_and_a_history_to_look_at() {
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
+
+        assert!(till.shift_report().is_ok(), "a shift is open");
+        assert!(
+            till.takings(BDT).expect("takings").minor() > 0,
+            "the day took money"
+        );
+        assert!(
+            !till.audit_entries().expect("reads").is_empty(),
+            "there is something in the feed"
+        );
+    }
+
+    #[test]
+    fn a_seeded_cafe_leaves_tickets_open_because_a_real_one_always_has_some() {
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Gulf, at(0)).expect("seeds");
+
+        assert!(till.book().open().count() > 0);
     }
 
     #[test]
