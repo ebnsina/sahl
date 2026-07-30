@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::money::{Currency, Money};
 use crate::sale::{Sale, SaleError};
-use crate::staff::{AuditEntry, Role, Severity, unapproved};
+use crate::staff::{ApprovalPolicy, AuditEntry, Role, Severity, unapproved};
 
 use super::finding::{Finding, Subject, ranked};
 
@@ -23,19 +23,27 @@ pub struct Sensitivity {
     pub minimum_sales: usize,
     /// How many times everyone else's rate counts as standing out.
     pub outlier_multiple: u32,
+    /// How far below a limit still counts as stopping just short of it.
+    pub near_limit: Money,
+    /// How many near-limit amounts by one person before it reads as a pattern rather than a
+    /// coincidence.
+    pub near_limit_occurrences: usize,
 }
 
 impl Sensitivity {
     /// A starting point, to be tuned against real shops.
     ///
-    /// **Both numbers are labelled guesses.** Nobody has watched a real till with this running
+    /// **All four numbers are labelled guesses.** Nobody has watched a real till with this running
     /// yet, and the right values are an empirical question about how noisy a real day is. They
     /// live here, named, rather than scattered as literals through the detectors.
     #[must_use]
-    pub const fn starting_point() -> Self {
+    pub fn starting_point(currency: Currency) -> Self {
         Self {
             minimum_sales: 20,
             outlier_multiple: 2,
+            // One major unit — the width of "just under".
+            near_limit: Money::from_minor(currency.minor_per_major(), currency),
+            near_limit_occurrences: 3,
         }
     }
 }
@@ -52,6 +60,9 @@ pub struct Activity<'a> {
     /// Who held which role at the time of reading, not at the time of the event. Roles live in the
     /// staff directory rather than the log, so this answer can change after the fact.
     pub roles: &'a BTreeMap<Uuid, Role>,
+    /// What a cashier may do unaided here. Judging a self-approval without it would put every
+    /// legitimate under-limit discount in the alert feed.
+    pub approval: &'a ApprovalPolicy,
     pub currency: Currency,
 }
 
@@ -66,6 +77,7 @@ pub fn scan(activity: &Activity<'_>, sensitivity: &Sensitivity) -> Result<Vec<Fi
     findings.extend(self_approvals(activity));
     findings.extend(discount_outliers(activity, sensitivity)?);
     findings.extend(void_outliers(activity, sensitivity));
+    findings.extend(near_limit(activity, sensitivity));
 
     Ok(ranked(findings))
 }
@@ -76,9 +88,11 @@ pub fn scan(activity: &Activity<'_>, sensitivity: &Sensitivity) -> Result<Vec<Fi
 /// approval step exists to put a second person in the loop, and this counts the times there was
 /// only one.
 fn self_approvals(activity: &Activity<'_>) -> Vec<Finding> {
-    let bypassed = unapproved(activity.audit, |staff_id| {
-        activity.roles.get(&staff_id).copied()
-    });
+    let bypassed = unapproved(
+        activity.audit,
+        |staff_id| activity.roles.get(&staff_id).copied(),
+        activity.approval,
+    );
 
     let mut per_person: BTreeMap<Uuid, usize> = BTreeMap::new();
     for entry in bypassed {
@@ -205,6 +219,62 @@ fn void_outliers(activity: &Activity<'_>, sensitivity: &Sensitivity) -> Vec<Find
     }
 
     findings
+}
+
+/// Amounts that repeatedly stop just under what would have needed somebody else.
+///
+/// The sharpest signal here, and the hardest to explain innocently at volume: an approval limit is
+/// invisible to a customer, so amounts clustering just beneath it are a pattern about the limit
+/// rather than about what was sold.
+///
+/// Only counts actions the person took on **their own authority** — where they are recorded as
+/// their own approver. One a manager signed off went through the control working as intended, and
+/// where it landed relative to the limit says nothing.
+///
+/// A limit of zero means nothing may be done unaided, so there is no "just under" to sit in and
+/// this looks at nothing at all.
+fn near_limit(activity: &Activity<'_>, sensitivity: &Sensitivity) -> Vec<Finding> {
+    let mut per_person: BTreeMap<(Uuid, &'static str), usize> = BTreeMap::new();
+
+    for entry in activity.audit {
+        let limit = match entry.kind {
+            "sale.order_discounted" => activity.approval.discount_limit,
+            "sale.line_voided" => activity.approval.void_limit,
+            _ => continue,
+        };
+        if limit.is_zero() || !entry.is_self_approved() {
+            continue;
+        }
+        let Some(amount) = entry.amount else { continue };
+
+        let floor = limit.minor().saturating_sub(sensitivity.near_limit.minor());
+        if amount.minor() > floor && amount.minor() <= limit.minor() {
+            let seen = per_person.entry((entry.actor, entry.kind)).or_default();
+            *seen = seen.saturating_add(1);
+        }
+    }
+
+    per_person
+        .into_iter()
+        .filter(|(_, count)| *count >= sensitivity.near_limit_occurrences)
+        .map(|((staff_id, kind), count)| Finding {
+            kind: "near_approval_limit",
+            severity: Severity::Notable,
+            subject: Subject::Person { staff_id },
+            count,
+            amount: Some(match kind {
+                "sale.line_voided" => activity.approval.void_limit,
+                _ => activity.approval.discount_limit,
+            }),
+            summary: format!(
+                "{count} {} just under the amount that would have needed approval",
+                match kind {
+                    "sale.line_voided" => "voids",
+                    _ => "discounts",
+                }
+            ),
+        })
+        .collect()
 }
 
 /// A share of something: `part` out of `gross`, across `sales` sales.
@@ -351,14 +421,24 @@ mod tests {
             sales,
             audit: entries,
             roles: role_table,
+            approval: &POLICY,
             currency: BDT,
         }
     }
+
+    /// A cashier may discount or void up to 500.00 unaided.
+    const POLICY: ApprovalPolicy = ApprovalPolicy {
+        discount_limit: Money::from_minor(50_000, BDT),
+        discount_rate_limit: crate::money::Rate::ZERO,
+        void_limit: Money::from_minor(50_000, BDT),
+    };
 
     fn sensitivity() -> Sensitivity {
         Sensitivity {
             minimum_sales: 2,
             outlier_multiple: 2,
+            near_limit: bdt(100),
+            near_limit_occurrences: 3,
         }
     }
 
@@ -400,7 +480,8 @@ mod tests {
         let entries = vec![
             audit("sale.line_voided", CASHIER, CASHIER, None),
             audit("sale.line_voided", CASHIER, CASHIER, None),
-            audit("sale.order_discounted", CASHIER, CASHIER, Some(bdt(500))),
+            // Over the limit, so this one bypassed a control rather than using an authority.
+            audit("sale.order_discounted", CASHIER, CASHIER, Some(bdt(90_000))),
         ];
         let table = roles();
         let found = scan(&activity(&[], &entries, &table), &sensitivity()).expect("scans");
@@ -537,6 +618,127 @@ mod tests {
     }
 
     #[test]
+    fn discounts_stopping_just_under_the_limit_are_a_pattern() {
+        // An approval limit is invisible to a customer. Amounts clustering just beneath it are a
+        // pattern about the limit, not about what was sold.
+        let entries = vec![
+            audit("sale.order_discounted", CASHIER, CASHIER, Some(bdt(49_950))),
+            audit("sale.order_discounted", CASHIER, CASHIER, Some(bdt(49_990))),
+            audit("sale.order_discounted", CASHIER, CASHIER, Some(bdt(50_000))),
+        ];
+        let table = roles();
+        let found = scan(&activity(&[], &entries, &table), &sensitivity()).expect("scans");
+
+        let near = found
+            .iter()
+            .find(|finding| finding.kind == "near_approval_limit")
+            .expect("found");
+        assert_eq!(near.count, 3);
+        assert_eq!(near.person(), Some(id(CASHIER)));
+    }
+
+    #[test]
+    fn an_under_limit_discount_is_not_an_unauthorised_self_approval() {
+        // A cashier inside the outlet's limit did it on their own authority and is recorded as
+        // their own approver. Judging that against the blanket permission alone would put every
+        // legitimate one in the alert feed — the fastest way to make an owner stop reading it.
+        let entries = vec![audit(
+            "sale.order_discounted",
+            CASHIER,
+            CASHIER,
+            Some(bdt(1_000)),
+        )];
+        let table = roles();
+        let found = scan(&activity(&[], &entries, &table), &sensitivity()).expect("scans");
+
+        assert!(found.is_empty(), "{found:?}");
+    }
+
+    #[test]
+    fn an_over_limit_self_approval_is_still_an_alert() {
+        // The control being bypassed, which is the thing worth waking somebody for.
+        let entries = vec![audit(
+            "sale.order_discounted",
+            CASHIER,
+            CASHIER,
+            Some(bdt(90_000)),
+        )];
+        let table = roles();
+        let found = scan(&activity(&[], &entries, &table), &sensitivity()).expect("scans");
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, "self_approved");
+    }
+
+    #[test]
+    fn a_manager_approved_discount_near_the_limit_says_nothing() {
+        // It went through the control working as intended, so where it landed relative to the
+        // limit tells nobody anything.
+        let entries = vec![
+            audit("sale.order_discounted", CASHIER, MANAGER, Some(bdt(49_950))),
+            audit("sale.order_discounted", CASHIER, MANAGER, Some(bdt(49_990))),
+            audit("sale.order_discounted", CASHIER, MANAGER, Some(bdt(49_970))),
+        ];
+        let table = roles();
+        let found = scan(&activity(&[], &entries, &table), &sensitivity()).expect("scans");
+
+        assert!(found.iter().all(|f| f.kind != "near_approval_limit"));
+    }
+
+    #[test]
+    fn one_discount_near_the_limit_is_a_coincidence() {
+        let entries = vec![audit(
+            "sale.order_discounted",
+            CASHIER,
+            CASHIER,
+            Some(bdt(49_950)),
+        )];
+        let table = roles();
+        let found = scan(&activity(&[], &entries, &table), &sensitivity()).expect("scans");
+
+        assert!(found.iter().all(|f| f.kind != "near_approval_limit"));
+    }
+
+    #[test]
+    fn voids_stopping_just_under_the_void_limit_count_too() {
+        let entries = vec![
+            audit("sale.line_voided", CASHIER, CASHIER, Some(bdt(49_950))),
+            audit("sale.line_voided", CASHIER, CASHIER, Some(bdt(49_960))),
+            audit("sale.line_voided", CASHIER, CASHIER, Some(bdt(49_970))),
+        ];
+        let table = roles();
+        let found = scan(&activity(&[], &entries, &table), &sensitivity()).expect("scans");
+
+        assert!(
+            found
+                .iter()
+                .any(|finding| finding.kind == "near_approval_limit")
+        );
+    }
+
+    #[test]
+    fn a_shop_where_nothing_may_be_done_unaided_has_no_limit_to_hug() {
+        // With a limit of zero there is no "just under" to sit in, so this looks at nothing.
+        let strict = ApprovalPolicy::strictest(BDT);
+        let entries = vec![
+            audit("sale.order_discounted", CASHIER, MANAGER, Some(bdt(10))),
+            audit("sale.order_discounted", CASHIER, MANAGER, Some(bdt(20))),
+            audit("sale.order_discounted", CASHIER, MANAGER, Some(bdt(30))),
+        ];
+        let table = roles();
+        let found = scan(
+            &Activity {
+                approval: &strict,
+                ..activity(&[], &entries, &table)
+            },
+            &sensitivity(),
+        )
+        .expect("scans");
+
+        assert!(found.iter().all(|f| f.kind != "near_approval_limit"));
+    }
+
+    #[test]
     fn an_empty_day_says_nothing() {
         let table = roles();
         assert!(
@@ -573,7 +775,7 @@ mod tests {
 
     #[test]
     fn the_starting_point_asks_for_enough_sales_to_mean_something() {
-        let sensitivity = Sensitivity::starting_point();
+        let sensitivity = Sensitivity::starting_point(BDT);
         assert!(
             sensitivity.minimum_sales > 1,
             "one sale compares to nothing"

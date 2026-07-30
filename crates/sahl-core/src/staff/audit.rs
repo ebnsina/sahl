@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::money::Money;
 use crate::sale::{SaleEvent, VoidReason};
 use crate::shift::{CashMovementReason, ShiftEvent};
-use crate::staff::role::{Permission, Role};
+use crate::staff::role::{ApprovalPolicy, Permission, Role, authorize_discount, authorize_void};
 use crate::time::Timestamp;
 
 /// How much attention a line deserves.
@@ -60,10 +60,39 @@ impl AuditEntry {
 /// ordinary business of a till and would drown the feed.
 #[must_use]
 pub fn from_sales(events: &[(SaleEvent, Timestamp, Uuid)]) -> Vec<AuditEntry> {
+    // What each line was worth, so a void can carry its own value. Without it the feed cannot
+    // judge a void against the outlet's threshold, and every under-limit void by a cashier would
+    // read as an authority they did not have.
+    let mut line_values: std::collections::BTreeMap<Uuid, Money> =
+        std::collections::BTreeMap::new();
+    for (event, _, _) in events {
+        if let SaleEvent::LineAdded {
+            line_id,
+            unit_price,
+            quantity,
+            modifiers,
+            ..
+        } = event
+        {
+            let mut price = *unit_price;
+            for modifier in modifiers {
+                price = price.checked_add(modifier.price_delta).unwrap_or(price);
+            }
+            if let Ok(value) = price.mul_ratio(
+                quantity.milli(),
+                crate::quantity::Quantity::MILLI_PER_UNIT,
+                crate::money::Rounding::HalfUp,
+            ) {
+                line_values.insert(*line_id, value);
+            }
+        }
+    }
+
     events
         .iter()
         .filter_map(|(event, at, actor)| match event {
             SaleEvent::LineVoided {
+                line_id,
                 reason,
                 authorized_by,
                 ..
@@ -75,7 +104,7 @@ pub fn from_sales(events: &[(SaleEvent, Timestamp, Uuid)]) -> Vec<AuditEntry> {
                 kind: "sale.line_voided",
                 actor: *actor,
                 approved_by: Some(*authorized_by),
-                amount: None,
+                amount: line_values.get(line_id).copied(),
                 summary: format!("Line voided ({})", void_label(*reason)),
             }),
 
@@ -188,25 +217,45 @@ pub fn self_approved(entries: &[AuditEntry]) -> Vec<&AuditEntry> {
 /// An unresolvable id counts as unapproved: a deleted or unknown actor approving their own void is
 /// more alarming than a known one, not less.
 #[must_use]
-pub fn unapproved<F>(entries: &[AuditEntry], role_of: F) -> Vec<&AuditEntry>
+pub fn unapproved<'a, F>(
+    entries: &'a [AuditEntry],
+    role_of: F,
+    policy: &ApprovalPolicy,
+) -> Vec<&'a AuditEntry>
 where
     F: Fn(Uuid) -> Option<Role>,
 {
     entries
         .iter()
         .filter(|entry| entry.is_self_approved())
-        .filter(|entry| role_of(entry.actor).is_none_or(|role| !permits(role, entry.kind)))
+        .filter(|entry| {
+            role_of(entry.actor).is_none_or(|role| !permits(role, entry.kind, entry.amount, policy))
+        })
         .collect()
 }
 
-/// Whether a role carries the authority an entry of this kind needed.
+/// Whether a role carried the authority an entry of this kind needed.
 ///
-/// Matches on `kind` rather than re-deriving from the event so the feed can judge entries that were
-/// read back from storage, where the original event is no longer to hand.
-fn permits(role: Role, kind: &str) -> bool {
+/// Matches on `kind` rather than re-deriving from the event, so the feed can judge entries read
+/// back from storage where the original event is no longer to hand.
+///
+/// **The threshold is part of the answer.** A cashier giving a discount inside the outlet's limit
+/// did so on their own authority and is recorded as their own approver — judging that against the
+/// blanket permission alone would put every legitimate one in the alert feed, which is both wrong
+/// and the fastest way to make an owner stop reading it.
+///
+/// An action whose amount was never recorded falls back to the blanket permission. That is the
+/// stricter reading, and the safer direction for an unknown to fall.
+fn permits(role: Role, kind: &str, amount: Option<Money>, policy: &ApprovalPolicy) -> bool {
     match kind {
-        "sale.line_voided" => role.can(Permission::VoidLine),
-        "sale.order_discounted" => role.can(Permission::ApplyDiscount),
+        "sale.line_voided" => amount.map_or_else(
+            || role.can(Permission::VoidLine),
+            |value| authorize_void(role, value, policy).is_allowed(),
+        ),
+        "sale.order_discounted" => amount.map_or_else(
+            || role.can(Permission::ApplyDiscount),
+            |value| authorize_discount(role, value, policy).is_allowed(),
+        ),
         "shift.cash_moved" => role.can(Permission::MoveCash),
         // Nothing else in the feed is an approval-bearing action.
         _ => true,
@@ -286,6 +335,24 @@ mod tests {
         )
     }
 
+    /// The line the `voided` fixture strikes off, worth 100.00.
+    fn added(minute: i64) -> (SaleEvent, Timestamp, Uuid) {
+        (
+            SaleEvent::LineAdded {
+                sale_id: id(1),
+                line_id: id(2),
+                product_id: id(3),
+                name: "Item".to_owned(),
+                unit_price: bdt(10_000),
+                quantity: crate::quantity::Quantity::ONE,
+                tax_class: crate::tax::TaxClass::standard(1500),
+                modifiers: Vec::new(),
+            },
+            at(minute),
+            id(CASHIER),
+        )
+    }
+
     fn cash(reason: CashMovementReason, minor: i64, minute: i64) -> (ShiftEvent, Uuid) {
         (
             ShiftEvent::CashMoved {
@@ -356,22 +423,54 @@ mod tests {
 
         assert_eq!(self_approved(&entries).len(), 1, "the fact");
         assert!(
-            unapproved(&entries, |_| Some(Role::Manager)).is_empty(),
+            unapproved(&entries, |_| Some(Role::Manager), &STRICT).is_empty(),
             "but not a finding"
         );
     }
 
+    /// Nothing may be done unaided, which is how an unconfigured outlet reads.
+    const STRICT: ApprovalPolicy = ApprovalPolicy {
+        discount_limit: Money::from_minor(0, Currency::Bdt),
+        discount_rate_limit: crate::money::Rate::ZERO,
+        void_limit: Money::from_minor(0, Currency::Bdt),
+    };
+
     #[test]
     fn a_cashier_approving_their_own_void_is_flagged() {
         let entries = from_sales(&[voided(CASHIER, 0)]);
-        assert_eq!(unapproved(&entries, |_| Some(Role::Cashier)).len(), 1);
+        assert_eq!(
+            unapproved(&entries, |_| Some(Role::Cashier), &STRICT).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_void_inside_the_outlets_limit_is_not_an_authority_the_cashier_lacked() {
+        // The threshold is part of the answer. Judging it against the blanket permission alone
+        // would put every legitimate under-limit void in the alert feed.
+        const LENIENT: ApprovalPolicy = ApprovalPolicy {
+            discount_limit: Money::from_minor(50_000, Currency::Bdt),
+            discount_rate_limit: crate::money::Rate::ZERO,
+            void_limit: Money::from_minor(50_000, Currency::Bdt),
+        };
+
+        let entries = from_sales(&[added(0), voided(CASHIER, 1)]);
+        assert_eq!(entries[0].amount, Some(bdt(10_000)));
+        assert!(unapproved(&entries, |_| Some(Role::Cashier), &LENIENT).is_empty());
+    }
+
+    #[test]
+    fn a_void_carries_the_value_of_the_line_that_was_struck_off() {
+        // Both so the threshold can be judged and so an owner reading the feed sees what it cost.
+        let entries = from_sales(&[added(0), voided(CASHIER, 1)]);
+        assert_eq!(entries[0].amount, Some(bdt(10_000)));
     }
 
     #[test]
     fn an_unknown_actor_is_flagged() {
         // A deleted or unrecognised actor approving their own void is more alarming, not less.
         let entries = from_sales(&[voided(CASHIER, 0)]);
-        assert_eq!(unapproved(&entries, |_| None).len(), 1);
+        assert_eq!(unapproved(&entries, |_| None, &STRICT).len(), 1);
     }
 
     #[test]

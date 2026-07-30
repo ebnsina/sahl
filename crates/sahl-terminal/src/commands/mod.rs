@@ -1174,11 +1174,14 @@ pub fn audit_feed(state: tauri::State<'_, TerminalState>) -> Result<Vec<AuditVie
     })?;
 
     let entries = sahl_core::staff::ranked(terminal.audit_entries()?);
-    let flagged: std::collections::BTreeSet<_> =
-        sahl_core::staff::unapproved(&entries, |actor| terminal.staff().role_of(actor))
-            .into_iter()
-            .map(|entry| (entry.at.millis(), entry.kind, entry.actor))
-            .collect();
+    let flagged: std::collections::BTreeSet<_> = sahl_core::staff::unapproved(
+        &entries,
+        |actor| terminal.staff().role_of(actor),
+        &terminal.approval_policy(),
+    )
+    .into_iter()
+    .map(|entry| (entry.at.millis(), entry.kind, entry.actor))
+    .collect();
 
     let name_of = |id: Uuid| {
         terminal

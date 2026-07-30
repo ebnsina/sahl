@@ -1078,9 +1078,10 @@ impl Terminal {
                 sales: &sales,
                 audit: &audit,
                 roles: &roles,
+                approval: &self.approval_policy(),
                 currency,
             },
-            &sahl_core::anomaly::Sensitivity::starting_point(),
+            &sahl_core::anomaly::Sensitivity::starting_point(currency),
         )?)
     }
 
@@ -2141,7 +2142,11 @@ mod tests {
         .expect("voids");
 
         let entries = till.audit_entries().expect("reads");
-        let flagged = sahl_core::staff::unapproved(&entries, |actor| till.staff().role_of(actor));
+        let flagged = sahl_core::staff::unapproved(
+            &entries,
+            |actor| till.staff().role_of(actor),
+            &till.approval_policy(),
+        );
 
         assert_eq!(flagged.len(), 1);
         assert_eq!(flagged[0].actor, id(CASHIER));
@@ -3644,6 +3649,62 @@ mod tests {
             till.authorize_for(Permission::ApplyDiscount, discount_of(999_999), "", at(1))
                 .expect("allowed"),
             id(MANAGER)
+        );
+    }
+
+    #[test]
+    fn a_discount_inside_the_limit_is_not_an_alert_about_the_cashier() {
+        // The interaction that thresholds introduced: an under-limit discount is recorded with the
+        // cashier as their own approver, and judging that against the blanket permission alone put
+        // every legitimate one in the alert feed. Found by trying it, not by reasoning about it.
+        let mut till = with_limits();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+        let who = till
+            .authorize_for(Permission::ApplyDiscount, discount_of(4_000), "", at(1))
+            .expect("allowed");
+        ring_up(&mut till, 0x100, 11_500);
+        till.record(
+            &SaleEvent::OrderDiscounted {
+                sale_id: id(0x100),
+                discount: sahl_core::tax::Discount::Amount {
+                    amount: Money::from_minor(4_000, BDT),
+                },
+                authorized_by: who,
+            },
+            id(80),
+            at(2),
+        )
+        .expect("discounts");
+
+        let findings = till.anomalies().expect("scans");
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn a_discount_over_the_limit_that_nobody_approved_is_still_an_alert() {
+        // The mirror case. If the fix above had simply stopped judging self-approvals, this is
+        // what would have gone quiet.
+        let mut till = with_limits();
+        till.sign_in(id(MANAGER), "5294", at(0)).expect("signs in");
+        ring_up(&mut till, 0x100, 11_500);
+        till.record(
+            &SaleEvent::OrderDiscounted {
+                sale_id: id(0x100),
+                discount: sahl_core::tax::Discount::Amount {
+                    amount: Money::from_minor(9_000, BDT),
+                },
+                // A cashier recorded as their own approver, above what they may do unaided.
+                authorized_by: id(CASHIER),
+            },
+            id(80),
+            at(2),
+        )
+        .expect("discounts");
+
+        let findings = till.anomalies().expect("scans");
+        assert!(
+            findings.iter().any(|f| f.kind == "self_approved"),
+            "{findings:?}"
         );
     }
 

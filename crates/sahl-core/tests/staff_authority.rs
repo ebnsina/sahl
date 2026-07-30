@@ -104,11 +104,18 @@ fn an_evening_at_the_counter_leaves_a_readable_trail() {
     // is a finding — a manager authorising their own skim is the ordinary way a safe drop happens.
     assert_eq!(self_approved(&feed).len(), 2);
 
-    let flagged = unapproved(&feed, |actor| match actor.as_u128() {
-        RUMA => Some(Role::Cashier),
-        HABIB => Some(Role::Manager),
-        _ => None,
-    });
+    // The strictest policy: nothing may be done unaided, which is how an unconfigured outlet
+    // reads and the setting this shop is on.
+    let policy = ApprovalPolicy::strictest(Currency::Bdt);
+    let flagged = unapproved(
+        &feed,
+        |actor| match actor.as_u128() {
+            RUMA => Some(Role::Cashier),
+            HABIB => Some(Role::Manager),
+            _ => None,
+        },
+        &policy,
+    );
 
     assert_eq!(flagged.len(), 1);
     assert_eq!(flagged[0].actor, id(RUMA));
