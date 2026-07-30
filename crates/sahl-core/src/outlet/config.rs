@@ -8,6 +8,7 @@ use crate::money::Currency;
 use crate::time::Timestamp;
 
 use super::profile::Profile;
+use crate::scale::ScaleFormat;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OutletError {
@@ -86,6 +87,9 @@ pub struct OutletConfig {
     pub tax_registration: Option<String>,
     /// Where documents are issued from, which is not always the registered address.
     pub address: String,
+    /// Set only where there is a scale printing labels. [`None`] means every barcode is an
+    /// ordinary one, which is the correct reading for a shop that has never weighed anything.
+    pub scale: Option<ScaleFormat>,
     pub configured_at: Timestamp,
 }
 
@@ -140,6 +144,7 @@ mod tests {
             regime: FiscalRegime::BdMushak,
             tax_registration: Some("0031234567890".to_owned()),
             address: "12 Dhanmondi 27, Dhaka 1209".to_owned(),
+            scale: None,
             configured_at: Timestamp::from_millis(1_753_000_000_000),
         }
     }

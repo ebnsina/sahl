@@ -192,6 +192,27 @@ export interface OutletView {
 	configuredAt: number;
 	/** What this profile can do, so a screen need not reimplement the table. */
 	capabilities: string[];
+	/** Absent where no scale prints labels, which is every outlet but a grocery. */
+	scale: ScaleFormatView | null;
+}
+
+/** How a counter scale lays out the labels it prints. */
+export interface ScaleFormatView {
+	prefix: string;
+	itemDigits: number;
+	embedded: 'weight' | 'price';
+	valueDigits: number;
+	valueDecimals: number;
+	fillerDigits: number;
+}
+
+/** What a scan resolved to. */
+export interface ScanView {
+	product: ProductView;
+	/** Thousandths. A weighed label brings its own; anything else is one. */
+	quantityMilli: number;
+	/** Set only where the scale already fixed the money — sell at this, do not reprice. */
+	priceMinor: number | null;
 }
 
 /** One row of a Mushak 6.3, by the form's own column numbers. */
@@ -554,7 +575,7 @@ export const till = {
 	allProducts: () => call<ProductView[]>('all_products'),
 
 	/** `null` for an unrecognised code — an ordinary event at a counter, not a fault. */
-	scan: (barcode: string) => call<ProductView | null>('scan', { barcode }),
+	scan: (barcode: string) => call<ScanView | null>('scan', { barcode }),
 
 	saveProduct: (input: {
 		/** Absent for a new product. */
@@ -598,6 +619,7 @@ export const till = {
 		regime: OutletView['regime'];
 		taxRegistration?: string | null;
 		address: string;
+		scale?: ScaleFormatView | null;
 		/** An owner's PIN. Ignored only before anyone is enrolled. */
 		pin: string;
 	}) => call<OutletView | null>('configure_outlet', input),

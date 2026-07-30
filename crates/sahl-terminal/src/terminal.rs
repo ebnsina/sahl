@@ -23,6 +23,7 @@ use sahl_core::outlet::{OutletConfig, OutletError, OutletEvent};
 use sahl_core::policy::lease::ClaimVerdict;
 use sahl_core::projection::SaleBook;
 use sahl_core::purchasing::{PurchaseError, PurchaseEvent, PurchaseOrder};
+use sahl_core::quantity::Quantity;
 use sahl_core::sale::{Sale, SaleError, SaleEvent};
 use sahl_core::shift::{Shift, ShiftError, ShiftEvent, ShiftReport, ShiftStatus};
 use sahl_core::staff::{Directory, DirectoryError, Permission, SignIn, StaffEvent};
@@ -69,6 +70,12 @@ pub enum TerminalError {
 
     #[error("{0}")]
     Floor(#[from] FloorError),
+
+    #[error("{0}")]
+    Scale(#[from] sahl_core::scale::ScaleError),
+
+    #[error("{0}")]
+    Weigh(#[from] sahl_core::scale::WeighError),
 
     #[error("{0}")]
     FiscalDocument(#[from] sahl_fiscal::FiscalError),
@@ -953,7 +960,76 @@ impl Terminal {
         }
         Ok(modifiers)
     }
+}
 
+/// What a scan turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scanned {
+    pub product_id: Uuid,
+    pub quantity: Quantity,
+    /// Set only where a scale already fixed the money. The line sells at this, not at the
+    /// catalogue price.
+    pub price: Option<Money>,
+}
+
+impl Terminal {
+    /// Resolve a scanned barcode, unwrapping a scale label if this outlet prints them.
+    ///
+    /// A scale label is an ordinary-looking EAN-13 with the weight — or the price — buried in its
+    /// digits. Nothing about it announces that, so the outlet's configured layout is the only thing
+    /// that can tell them apart, and a shop with no scale never takes this path at all.
+    ///
+    /// `None` for a code this shop does not know: an unrecognised scan is an ordinary event at a
+    /// counter — a loyalty card, a coupon, a competitor's packaging — not a fault.
+    ///
+    /// # Errors
+    /// [`TerminalError`] when a label *is* ours and is corrupt, or carries a weight the product's
+    /// unit cannot hold. Loud on purpose: silently falling through to "not found" would have a
+    /// cashier hunting the shelf for a product they are holding.
+    pub fn scan(&self, barcode: &str) -> Result<Option<Scanned>, TerminalError> {
+        let barcode = barcode.trim();
+
+        let Some(format) = self
+            .outlet
+            .as_ref()
+            .and_then(|outlet| outlet.scale.as_ref())
+            .filter(|format| format.matches(barcode))
+        else {
+            return Ok(self.catalogue.by_barcode(barcode).map(|product| Scanned {
+                product_id: product.id,
+                quantity: Quantity::ONE,
+                price: None,
+            }));
+        };
+
+        let currency = self
+            .outlet
+            .as_ref()
+            .map_or(sahl_core::Currency::Bdt, |outlet| outlet.currency);
+        let scan = format.parse(barcode, currency)?;
+
+        let Some(product) = self.catalogue.by_barcode(&scan.item_code) else {
+            return Ok(None);
+        };
+
+        Ok(Some(match scan.value {
+            sahl_core::scale::ScannedValue::Weight(quantity) => Scanned {
+                product_id: product.id,
+                quantity: sahl_core::scale::weigh(product.unit, quantity)?,
+                price: None,
+            },
+            // The scale already priced it, so the line is one of those, at that. Repricing from the
+            // catalogue would disagree with the sticker in the customer's hand.
+            sahl_core::scale::ScannedValue::Price(price) => Scanned {
+                product_id: product.id,
+                quantity: Quantity::ONE,
+                price: Some(price),
+            },
+        }))
+    }
+}
+
+impl Terminal {
     /// What this shop sells.
     #[must_use]
     pub const fn catalogue(&self) -> &Catalogue {
@@ -2544,6 +2620,7 @@ mod tests {
             regime: sahl_core::outlet::FiscalRegime::BdMushak,
             tax_registration: Some("0031234567890".to_owned()),
             address: "12 Dhanmondi 27, Dhaka".to_owned(),
+            scale: None,
         }
     }
 
@@ -2825,6 +2902,162 @@ mod tests {
             reloaded.catalogue().by_barcode("8901").expect("found").name,
             "Rice, loose"
         );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Scale labels
+    // ------------------------------------------------------------------------------------------
+
+    /// The common grocery layout: prefix 20, five-digit item code, weight in grams.
+    fn weighing_outlet() -> sahl_core::outlet::OutletSettings {
+        sahl_core::outlet::OutletSettings {
+            profile: sahl_core::outlet::Profile::Grocery,
+            scale: Some(
+                sahl_core::scale::ScaleFormat::new(
+                    "20",
+                    5,
+                    sahl_core::scale::Embedded::Weight,
+                    5,
+                    3,
+                    0,
+                )
+                .expect("valid"),
+            ),
+            ..outlet_settings()
+        }
+    }
+
+    /// Build the label a scale would print, check digit and all.
+    fn label(twelve: &str) -> String {
+        let mut sum: u32 = 0;
+        for (index, character) in twelve.chars().enumerate() {
+            let digit = character.to_digit(10).expect("digits");
+            sum = sum.saturating_add(digit.saturating_mul(if index % 2 == 0 { 1 } else { 3 }));
+        }
+        format!("{twelve}{}", (10_u32.saturating_sub(sum % 10)) % 10)
+    }
+
+    fn stocked(till: &mut Terminal, unit: sahl_core::catalogue::Unit, barcode: &str) {
+        let mut details = product_details("Rice, loose", 4_600, unit);
+        details.barcodes = vec![barcode.to_owned()];
+        till.record_catalogue(
+            &sahl_core::catalogue::CatalogueEvent::ProductAdded {
+                product_id: id(0x101),
+                details,
+                at: at(0),
+                added_by: id(0x0E),
+            },
+            id(61),
+            at(0),
+        )
+        .expect("adds");
+    }
+
+    #[test]
+    fn a_weighed_label_brings_its_own_quantity() {
+        let mut till = fresh();
+        till.record_outlet(&configure(weighing_outlet()), id(50), at(0))
+            .expect("configures");
+        stocked(&mut till, sahl_core::catalogue::Unit::Kilogram, "12345");
+
+        let scanned = till
+            .scan(&label("201234501250"))
+            .expect("scans")
+            .expect("found");
+
+        assert_eq!(scanned.product_id, id(0x101));
+        assert_eq!(scanned.quantity, Quantity::from_milli(1_250));
+        assert_eq!(scanned.price, None, "the till still prices it");
+    }
+
+    #[test]
+    fn a_priced_label_is_sold_at_the_figure_on_the_sticker() {
+        // The customer agreed to that number at the counter. A unit price edited since would
+        // silently disagree with the label in their hand.
+        let mut till = fresh();
+        let settings = sahl_core::outlet::OutletSettings {
+            scale: Some(
+                sahl_core::scale::ScaleFormat::new(
+                    "21",
+                    5,
+                    sahl_core::scale::Embedded::Price,
+                    5,
+                    2,
+                    0,
+                )
+                .expect("valid"),
+            ),
+            ..weighing_outlet()
+        };
+        till.record_outlet(&configure(settings), id(50), at(0))
+            .expect("configures");
+        stocked(&mut till, sahl_core::catalogue::Unit::Kilogram, "12345");
+
+        let scanned = till
+            .scan(&label("211234500875"))
+            .expect("scans")
+            .expect("found");
+
+        assert_eq!(scanned.quantity, Quantity::ONE);
+        assert_eq!(scanned.price, Some(Money::from_minor(875, BDT)));
+    }
+
+    #[test]
+    fn a_corrupt_label_is_loud_rather_than_not_found() {
+        // "Not found" would send a cashier to the shelf looking for a product they are holding.
+        let mut till = fresh();
+        till.record_outlet(&configure(weighing_outlet()), id(50), at(0))
+            .expect("configures");
+        stocked(&mut till, sahl_core::catalogue::Unit::Kilogram, "12345");
+
+        let mut corrupt = label("201234501250");
+        corrupt.pop();
+        corrupt.push('7');
+
+        assert!(matches!(till.scan(&corrupt), Err(TerminalError::Scale(_))));
+    }
+
+    #[test]
+    fn a_shop_with_no_scale_reads_the_same_barcode_as_an_ordinary_one() {
+        // The layout is the only thing that can tell a scale label from a supplier code, so an
+        // outlet that never configured one must not start inventing weights.
+        let mut till = fresh();
+        till.record_outlet(&configure(outlet_settings()), id(50), at(0))
+            .expect("configures");
+        let barcode = label("201234501250");
+        stocked(&mut till, sahl_core::catalogue::Unit::Kilogram, &barcode);
+
+        let scanned = till.scan(&barcode).expect("scans").expect("found");
+        assert_eq!(scanned.quantity, Quantity::ONE);
+    }
+
+    #[test]
+    fn a_weighed_label_for_something_sold_whole_is_refused() {
+        let mut till = fresh();
+        till.record_outlet(&configure(weighing_outlet()), id(50), at(0))
+            .expect("configures");
+        stocked(&mut till, sahl_core::catalogue::Unit::Piece, "12345");
+
+        assert!(matches!(
+            till.scan(&label("201234501250")),
+            Err(TerminalError::Weigh(_))
+        ));
+    }
+
+    #[test]
+    fn a_label_for_a_product_this_till_has_never_seen_is_simply_not_found() {
+        let mut till = fresh();
+        till.record_outlet(&configure(weighing_outlet()), id(50), at(0))
+            .expect("configures");
+
+        assert_eq!(till.scan(&label("209999901250")).expect("scans"), None);
+    }
+
+    #[test]
+    fn an_unknown_ordinary_barcode_is_not_a_fault() {
+        // A loyalty card, a coupon, a competitor's packaging — all scanned at a counter daily.
+        let till = fresh();
+        assert_eq!(till.scan("8901234567895").expect("scans"), None);
     }
 
     #[test]

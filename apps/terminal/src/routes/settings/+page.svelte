@@ -58,6 +58,14 @@
 	let regime = $state<OutletView['regime']>('none');
 	let taxRegistration = $state('');
 	let address = $state('');
+	/** Off unless the shop has a scale printing labels — a shop without one must never guess. */
+	let scaleOn = $state(false);
+	let scalePrefix = $state('20');
+	let scaleItemDigits = $state('5');
+	let scaleEmbedded = $state<'weight' | 'price'>('weight');
+	let scaleValueDigits = $state('5');
+	let scaleValueDecimals = $state('3');
+	let scaleFillerDigits = $state('0');
 
 	let pendingSave = $state(false);
 	let approvalError = $state<string | null>(null);
@@ -88,7 +96,25 @@
 		regime = result.regime;
 		taxRegistration = result.taxRegistration ?? '';
 		address = result.address;
+		scaleOn = result.scale !== null;
+		if (result.scale) {
+			scalePrefix = result.scale.prefix;
+			scaleItemDigits = String(result.scale.itemDigits);
+			scaleEmbedded = result.scale.embedded;
+			scaleValueDigits = String(result.scale.valueDigits);
+			scaleValueDecimals = String(result.scale.valueDecimals);
+			scaleFillerDigits = String(result.scale.fillerDigits);
+		}
 	}
+
+	/** Digits in the layout, so the screen can say whether it adds up before the till refuses it. */
+	const scaleDigits = $derived(
+		scalePrefix.trim().length +
+			Number(scaleItemDigits || 0) +
+			Number(scaleValueDigits || 0) +
+			Number(scaleFillerDigits || 0) +
+			1
+	);
 
 	$effect(() => {
 		available = isTillAvailable();
@@ -103,6 +129,14 @@
 		}
 		if (!address.trim()) {
 			error = { code: 'bad_address', message: 'Enter the address documents are issued from' };
+			return;
+		}
+		if (scaleOn && scaleDigits !== 13) {
+			// Caught here, where an owner is looking at the layout — not at the counter mid-queue.
+			error = {
+				code: 'bad_scale',
+				message: `A label is 13 digits; this layout comes to ${scaleDigits}`
+			};
 			return;
 		}
 		if (needsRegistration && !taxRegistration.trim()) {
@@ -240,6 +274,83 @@
 						<p class="text-secondary text-text-muted -mt-2">
 							{PROFILES.find((entry) => entry.value === profile)?.note}
 						</p>
+
+						<div class="border-border flex flex-col gap-3 border-t pt-4">
+							<label class="flex items-start gap-2">
+								<input type="checkbox" class="mt-1" bind:checked={scaleOn} />
+								<span>
+									<span class="font-medium">A counter scale prints labels</span>
+									<span class="text-secondary text-text-muted block">
+										The weight or the price is hidden inside an ordinary-looking barcode. Nothing
+										about the label says which, so the layout has to be set here.
+									</span>
+								</span>
+							</label>
+
+							{#if scaleOn}
+								<Field
+									id="scale-embedded"
+									label="What the label carries"
+									hint="Price-embedded labels are sold at the figure on the sticker, never repriced."
+								>
+									{#snippet children({ id, describedBy })}
+										<Select
+											{id}
+											{describedBy}
+											bind:value={scaleEmbedded}
+											options={[
+												{ value: 'weight', label: 'Weight' },
+												{ value: 'price', label: 'Price' }
+											]}
+										/>
+									{/snippet}
+								</Field>
+
+								<div class="grid grid-cols-2 gap-3">
+									<Field id="scale-prefix" label="Prefix" hint="Usually 20–29.">
+										{#snippet children({ id, describedBy })}
+											<Input {id} {describedBy} bind:value={scalePrefix} numeric />
+										{/snippet}
+									</Field>
+
+									<Field id="scale-item" label="Item code digits">
+										{#snippet children({ id, describedBy })}
+											<Input {id} {describedBy} bind:value={scaleItemDigits} numeric />
+										{/snippet}
+									</Field>
+
+									<Field id="scale-value" label="Value digits">
+										{#snippet children({ id, describedBy })}
+											<Input {id} {describedBy} bind:value={scaleValueDigits} numeric />
+										{/snippet}
+									</Field>
+
+									<Field id="scale-decimals" label="Decimal places">
+										{#snippet children({ id, describedBy })}
+											<Input {id} {describedBy} bind:value={scaleValueDecimals} numeric />
+										{/snippet}
+									</Field>
+
+									<Field
+										id="scale-filler"
+										label="Digits to ignore"
+										hint="The scale's own check digit, where it prints one."
+									>
+										{#snippet children({ id, describedBy })}
+											<Input {id} {describedBy} bind:value={scaleFillerDigits} numeric />
+										{/snippet}
+									</Field>
+								</div>
+
+								<p
+									class="text-secondary {scaleDigits === 13
+										? 'text-text-muted'
+										: 'text-danger-text'}"
+								>
+									{scaleDigits} of 13 digits
+								</p>
+							{/if}
+						</div>
 
 						<div class="grid grid-cols-2 gap-3">
 							<Field id="outlet-currency" label="Currency">

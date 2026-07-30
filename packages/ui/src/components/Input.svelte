@@ -16,6 +16,7 @@
 		forceLtr?: boolean;
 		class?: string;
 		oninput?: (event: Event) => void;
+		onkeydown?: (event: KeyboardEvent) => void;
 	}
 
 	let {
@@ -29,7 +30,8 @@
 		numeric = false,
 		forceLtr = false,
 		class: extraClass = '',
-		oninput
+		oninput,
+		onkeydown
 	}: Props = $props();
 </script>
 
@@ -50,4 +52,5 @@
 	       {numeric ? 'numeric' : ''} {extraClass}"
 	style="min-height: var(--scale-control-height)"
 	{oninput}
+	{onkeydown}
 />

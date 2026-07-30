@@ -25,6 +25,7 @@ use sahl_core::outlet::{FiscalRegime, OutletEvent, OutletSettings, Profile};
 use sahl_core::purchasing::{CloseReason, OrderLine, PurchaseEvent};
 use sahl_core::quantity::Quantity;
 use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
+use sahl_core::scale::{Embedded, ScaleFormat};
 use sahl_core::shift::{CashMovementReason, ShiftEvent};
 use sahl_core::staff::{Permission, Role, StaffEvent, pin as staff_pin};
 use sahl_core::tax::{Discount, PricingMode, TaxClass};
@@ -95,6 +96,10 @@ impl From<TerminalError> for CommandError {
             | TerminalError::FiscalDocument(_)
             | TerminalError::Catalogue(_)
             | TerminalError::Floor(_) => "rejected",
+            // Its own code: a corrupt scale label means "scan it again", which is different advice
+            // from anything else the till refuses.
+            TerminalError::Scale(_) => "bad_scan",
+            TerminalError::Weigh(_) => "rejected",
             TerminalError::NotInvoiced { .. } => "not_invoiced",
             TerminalError::Directory(_) | TerminalError::Purchase(_) | TerminalError::Fiscal(_) => {
                 "rejected"
@@ -1276,6 +1281,36 @@ pub struct OutletView {
     pub configured_at: i64,
     /// What this profile can do, so a screen need not reimplement the table.
     pub capabilities: Vec<&'static str>,
+    /// Absent where no scale prints labels, which is every outlet but a grocery.
+    pub scale: Option<ScaleFormatView>,
+}
+
+/// A configured scale layout, as the settings screen redraws it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleFormatView {
+    pub prefix: String,
+    pub item_digits: u8,
+    pub embedded: &'static str,
+    pub value_digits: u8,
+    pub value_decimals: u8,
+    pub filler_digits: u8,
+}
+
+impl ScaleFormatView {
+    fn of(format: &ScaleFormat) -> Self {
+        Self {
+            prefix: format.prefix().to_owned(),
+            item_digits: format.item_digits(),
+            embedded: match format.embedded() {
+                Embedded::Weight => "weight",
+                Embedded::Price => "price",
+            },
+            value_digits: format.value_digits(),
+            value_decimals: format.value_decimals(),
+            filler_digits: format.filler_digits(),
+        }
+    }
 }
 
 /// The outlet's configuration, or `None` if setup has not been done.
@@ -1304,6 +1339,7 @@ pub fn outlet_config(
             .into_iter()
             .map(capability_label)
             .collect(),
+        scale: outlet.scale.as_ref().map(ScaleFormatView::of),
     }))
 }
 
@@ -1325,6 +1361,7 @@ pub fn configure_outlet(
     regime: String,
     tax_registration: Option<String>,
     address: String,
+    scale: Option<ScaleFormatInput>,
     pin: String,
 ) -> Result<Option<OutletView>, CommandError> {
     let profile = match profile.as_str() {
@@ -1390,6 +1427,10 @@ pub fn configure_outlet(
                     (!trimmed.is_empty()).then_some(trimmed)
                 }),
                 address: address.trim().to_owned(),
+                scale: scale
+                    .map(ScaleFormatInput::into_format)
+                    .transpose()
+                    .map_err(TerminalError::from)?,
             },
             at: now(),
             configured_by,
@@ -1723,24 +1764,75 @@ pub fn all_products(
         .collect())
 }
 
-/// Resolve a scanned barcode.
+/// How a counter scale lays out its printed labels, as the settings screen sends it.
+///
+/// A separate input type because [`ScaleFormat`] validates on construction, and the place to fail
+/// is an owner looking at a settings screen — not a cashier mid-queue.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScaleFormatInput {
+    pub prefix: String,
+    pub item_digits: u8,
+    /// `weight` or `price`.
+    pub embedded: Embedded,
+    pub value_digits: u8,
+    pub value_decimals: u8,
+    pub filler_digits: u8,
+}
+
+impl ScaleFormatInput {
+    fn into_format(self) -> Result<ScaleFormat, sahl_core::scale::ScaleError> {
+        ScaleFormat::new(
+            self.prefix.trim(),
+            self.item_digits,
+            self.embedded,
+            self.value_digits,
+            self.value_decimals,
+            self.filler_digits,
+        )
+    }
+}
+
+/// What a scan resolved to.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanView {
+    pub product: ProductView,
+    /// Thousandths. A weighed label brings its own; anything else is one.
+    pub quantity_milli: i64,
+    /// Set only where the scale already fixed the money. **Sell at this** — repricing from the
+    /// catalogue would disagree with the sticker in the customer's hand.
+    pub price_minor: Option<i64>,
+}
+
+/// Resolve a scanned barcode, unwrapping a scale label where the outlet prints them.
 ///
 /// Returns `None` rather than erroring on an unknown code: an unrecognised scan is an ordinary
-/// event at a counter — a loyalty card, a coupon, a competitor's packaging — not a fault.
+/// event at a counter — a loyalty card, a coupon, a competitor's packaging — not a fault. A label
+/// that *is* ours and is corrupt does error, because there the cashier needs to scan again rather
+/// than go looking on the shelf.
 #[tauri::command]
 pub fn scan(
     state: tauri::State<'_, TerminalState>,
     barcode: String,
-) -> Result<Option<ProductView>, CommandError> {
+) -> Result<Option<ScanView>, CommandError> {
     let terminal = state.inner.lock().map_err(|_| CommandError {
         code: "poisoned",
         message: "the till is in an inconsistent state and must be restarted".to_owned(),
     })?;
 
-    Ok(terminal
-        .catalogue()
-        .by_barcode(barcode.trim())
-        .map(ProductView::of))
+    let Some(scanned) = terminal.scan(&barcode)? else {
+        return Ok(None);
+    };
+    let Some(product) = terminal.catalogue().get(scanned.product_id) else {
+        return Ok(None);
+    };
+
+    Ok(Some(ScanView {
+        product: ProductView::of(product),
+        quantity_milli: scanned.quantity.milli(),
+        price_minor: scanned.price.map(sahl_core::Money::minor),
+    }))
 }
 
 /// Add a product, or change one.

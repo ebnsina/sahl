@@ -67,6 +67,8 @@
 	/** Shares of the bill, once someone asks to split it. */
 	let split = $state<SplitPartView[] | null>(null);
 	let splitWays = $state(2);
+	/** The last barcode nothing matched, so the cashier sees which scan was ignored. */
+	let scanMiss = $state<string | null>(null);
 	/** What the stations have not yet been told about this ticket. */
 	let pendingTickets = $state<KitchenTicketView[]>([]);
 	let fireOutcome = $state<{ printed: boolean; reason: string | null } | null>(null);
@@ -239,7 +241,12 @@
 		choosing = null;
 	}
 
-	function ring(item: ProductView, chosenOptions: string[]) {
+	function ring(
+		item: ProductView,
+		chosenOptions: string[],
+		quantityMilli = 1000,
+		priceMinor = item.priceMinor
+	) {
 		const current = sale;
 		if (!current) return;
 		void run(
@@ -248,16 +255,46 @@
 					saleId: current.id,
 					productId: item.id,
 					name: item.name,
-					unitPriceMinor: item.priceMinor,
+					unitPriceMinor: priceMinor,
 					// One unit per tap. A divisible product still needs a real quantity, which is what
-					// a scale or a keypad will supply — tapping it is not a weighing.
-					quantityMilli: 1000,
+					// a scale label or a keypad supplies — tapping it is not a weighing.
+					quantityMilli,
 					taxBasisPoints: item.taxBasisPoints,
 					taxTreatment: item.taxTreatment,
 					chosenOptions,
 					currency: 'BDT'
 				}),
 			(result) => (sale = result)
+		);
+	}
+
+	function scan(event: KeyboardEvent) {
+		// A hardware scanner types the digits and presses Enter, which is why nothing here listens
+		// for individual keystrokes or races a timer.
+		if (event.key !== 'Enter') return;
+		const field = event.target as HTMLInputElement;
+		const barcode = field.value.trim();
+		if (!barcode || !sale) return;
+		field.value = '';
+		scanMiss = null;
+
+		void run(
+			() => till.scan(barcode),
+			(result) => {
+				if (!result) {
+					// Not a fault. A loyalty card, a coupon, a competitor's packaging.
+					scanMiss = barcode;
+					return;
+				}
+				// A scale label already decided the weight, and sometimes the money too — passing
+				// the catalogue price back would disagree with the sticker in the customer's hand.
+				ring(
+					result.product,
+					[],
+					result.quantityMilli,
+					result.priceMinor ?? result.product.priceMinor
+				);
+			}
 		);
 	}
 
@@ -490,6 +527,24 @@
 	{:else}
 		<div class="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 lg:grid-cols-[1fr_26rem]">
 			<Card label="Items" class="flex min-h-0 flex-col">
+				<div class="mb-2 flex flex-col gap-1">
+					<!-- A hardware scanner types and presses Enter, so this is an ordinary field that
+					     clears itself. Nothing about a scale label looks different from a supplier one. -->
+					<Input
+						id="scan"
+						placeholder="Scan a barcode"
+						numeric
+						forceLtr
+						disabled={!sale || busy}
+						onkeydown={scan}
+					/>
+					{#if scanMiss}
+						<p class="text-secondary text-text-muted">
+							Nothing matched <span class="numeric">{scanMiss}</span>.
+						</p>
+					{/if}
+				</div>
+
 				{#if catalogue.length === 0}
 					<div class="flex flex-col items-start gap-2 p-2">
 						<p class="text-secondary text-text-muted">

@@ -9,6 +9,7 @@ use crate::time::Timestamp;
 
 use super::config::{FiscalRegime, OutletConfig, OutletError};
 use super::profile::Profile;
+use crate::scale::ScaleFormat;
 
 /// The settings an outlet is configured with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,6 +21,10 @@ pub struct OutletSettings {
     pub regime: FiscalRegime,
     pub tax_registration: Option<String>,
     pub address: String,
+    /// How this outlet's counter scale lays out its printed labels. Grocery only, and absent
+    /// everywhere else — a shop with no scale must not be asked to describe one.
+    #[serde(default)]
+    pub scale: Option<ScaleFormat>,
 }
 
 /// Everything that happens to an outlet's configuration.
@@ -77,6 +82,7 @@ impl OutletEvent {
                     regime: settings.regime,
                     tax_registration: settings.tax_registration.clone(),
                     address: settings.address.clone(),
+                    scale: settings.scale.clone(),
                     configured_at: *at,
                 };
                 config.validate()?;
@@ -107,6 +113,7 @@ mod tests {
             regime: FiscalRegime::BdMushak,
             tax_registration: Some("0031234567890".to_owned()),
             address: "12 Dhanmondi 27, Dhaka".to_owned(),
+            scale: None,
         }
     }
 
