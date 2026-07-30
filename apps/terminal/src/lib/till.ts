@@ -304,6 +304,14 @@ export interface TicketView {
 	heldElsewhere: boolean;
 }
 
+/** One person's share of a split bill. */
+export interface SplitPartView {
+	number: number;
+	amountMinor: number;
+	/** The lines this part covers. Empty for an even split. */
+	lineIds: string[];
+}
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -400,6 +408,15 @@ export const till = {
 
 	/** Every ticket still open on this outlet. Without this they are unreachable. */
 	openTickets: () => call<TicketView[]>('open_tickets'),
+
+	/**
+	 * Work out each share of a bill. Records nothing — a split is arithmetic, and the shares are
+	 * then taken through the ordinary tender path.
+	 *
+	 * Pass an empty `lineAssignment` to split evenly `ways` times.
+	 */
+	splitBill: (saleId: string, ways: number, lineAssignment: string[][] = []) =>
+		call<SplitPartView[]>('split_bill', { saleId, ways, lineAssignment }),
 
 	/** Abandon tickets with nothing on them. Never touches one holding items. */
 	discardEmptyTickets: (abandonedBy: string) =>

@@ -39,6 +39,7 @@
 		type SyncView,
 		type ModifierGroup,
 		type ProductView,
+		type SplitPartView,
 		type TillStatus
 	} from '$lib/till';
 
@@ -62,6 +63,9 @@
 	let choosing = $state<ProductView | null>(null);
 	/** Option ids picked so far, across every group. */
 	let chosen = $state<string[]>([]);
+	/** Shares of the bill, once someone asks to split it. */
+	let split = $state<SplitPartView[] | null>(null);
+	let splitWays = $state(2);
 	let printOutcome = $state<PrintOutcome | null>(null);
 	let status = $state<TillStatus | null>(null);
 	let sync = $state<SyncView | null>(null);
@@ -143,6 +147,7 @@
 		document = null;
 		documentProblem = null;
 		printOutcome = null;
+		split = null;
 		void run(
 			() => till.openSale(CASHIER),
 			(result) => {
@@ -247,6 +252,37 @@
 				busy = false;
 			}
 		})();
+	}
+
+	function splitEvenly(ways: number) {
+		const current = sale;
+		if (!current) return;
+		splitWays = ways;
+		void run(
+			() => till.splitBill(current.id, ways),
+			(result) => (split = result)
+		);
+	}
+
+	/**
+	 * Take one share as cash.
+	 *
+	 * The share is just a tender — a split is arithmetic, and the sale has recorded partial tenders
+	 * since P1. Nothing about the sale knows it was split.
+	 */
+	function tenderShare(amountMinor: number) {
+		const current = sale;
+		if (!current) return;
+		void run(
+			() =>
+				till.recordTender({
+					saleId: current.id,
+					method: 'cash',
+					amountMinor,
+					currency: 'BDT'
+				}),
+			(result) => (sale = result)
+		);
 	}
 
 	function tenderCash() {
@@ -658,6 +694,51 @@
 									/>
 								{/snippet}
 							</Field>
+							{#if split}
+								<div class="border-border bg-surface-sunken mb-2 flex flex-col gap-2 border p-3">
+									<div class="flex items-baseline justify-between">
+										<span class="label-caps">Split {format.integer(splitWays)} ways</span>
+										<Button variant="ghost" size="xs" onclick={() => (split = null)}>Cancel</Button>
+									</div>
+
+									{#each split as part (part.number)}
+										<div class="flex items-center justify-between gap-2">
+											<span class="text-secondary text-text-secondary">
+												Share {format.integer(part.number)}
+											</span>
+											<Numeric value={format.moneyPlain(part.amountMinor)} />
+											<Button
+												variant="secondary"
+												size="xs"
+												onclick={() => tenderShare(part.amountMinor)}
+												disabled={busy || balanceDue <= 0}
+											>
+												Take
+											</Button>
+										</div>
+									{/each}
+
+									<p class="text-secondary text-text-muted">
+										Each share is an ordinary tender. The shares add up to the bill exactly — the
+										odd minor unit goes to the earliest, because somebody has to absorb it.
+									</p>
+								</div>
+							{:else if balanceDue > 0 && sale.lines.length > 0}
+								<div class="mb-2 flex flex-wrap items-center gap-2">
+									<span class="text-secondary text-text-muted">Split</span>
+									{#each [2, 3, 4] as ways (ways)}
+										<Button
+											variant="ghost"
+											size="xs"
+											onclick={() => splitEvenly(ways)}
+											disabled={busy}
+										>
+											{format.integer(ways)} ways
+										</Button>
+									{/each}
+								</div>
+							{/if}
+
 							<!-- Laid out by weight rather than left to wrap. The two tender buttons are the
 							     same kind of action, so they share a row at equal width; completing the sale is
 							     the one thing this panel exists for, so it gets its own full-width row; and

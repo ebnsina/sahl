@@ -20,11 +20,13 @@
 mod error;
 mod event;
 mod line;
+mod split;
 mod state;
 mod tender;
 
 pub use error::SaleError;
 pub use event::SaleEvent;
 pub use line::{LineVoid, Modifier, SaleLine, VoidReason};
-pub use state::{Sale, SaleStatus, cash};
+pub use split::{SplitError, SplitPart, by_lines, evenly};
+pub use state::{Sale, SaleStatus, Seating, cash};
 pub use tender::{Tender, TenderMethod, Wallet};

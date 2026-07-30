@@ -3260,4 +3260,125 @@ mod tests {
             Money::from_minor(86_000, BDT)
         );
     }
+
+    // ------------------------------------------------------------------------------------------
+    // Splitting
+    // ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn an_even_split_of_a_real_sale_sums_to_its_total() {
+        let mut till = fresh();
+        till.record(&opened(), id(80), at(0)).expect("opens");
+        till.record(&line(10_000), id(81), at(1)).expect("adds");
+
+        let total = till
+            .sale(id(SALE))
+            .expect("sale")
+            .totals()
+            .expect("totals")
+            .total;
+        let parts = sahl_core::sale::evenly(total, 3).expect("splits");
+
+        let summed: i64 = parts.iter().map(|part| part.amount.minor()).sum();
+        assert_eq!(summed, total.minor(), "nothing lost across three payers");
+    }
+
+    #[test]
+    fn splitting_by_line_uses_the_engines_totals_not_a_recomputation() {
+        // An order discount is apportioned across lines by the tax engine. Recomputing here would
+        // be a second implementation of that apportionment, and the two disagreeing is a bill that
+        // does not add up.
+        let mut till = fresh();
+        till.record(&opened(), id(80), at(0)).expect("opens");
+        till.record(&line(10_000), id(81), at(1)).expect("adds");
+        till.record(
+            &SaleEvent::LineAdded {
+                sale_id: id(SALE),
+                line_id: id(12),
+                product_id: id(13),
+                name: "Tea".to_owned(),
+                unit_price: Money::from_minor(20_000, BDT),
+                quantity: Quantity::ONE,
+                tax_class: TaxClass::standard(1500),
+                modifiers: Vec::new(),
+            },
+            id(82),
+            at(2),
+        )
+        .expect("adds");
+        till.record(
+            &SaleEvent::OrderDiscounted {
+                sale_id: id(SALE),
+                discount: sahl_core::tax::Discount::Amount {
+                    amount: Money::from_minor(3_000, BDT),
+                },
+                authorized_by: id(MANAGER),
+            },
+            id(83),
+            at(3),
+        )
+        .expect("discounts");
+
+        let sale = till.sale(id(SALE)).expect("sale");
+        let totals = sale.totals().expect("totals");
+        let line_totals: Vec<Money> = totals.lines.iter().map(|line| line.total).collect();
+        let active: Vec<sahl_core::sale::SaleLine> = sale.active_lines().cloned().collect();
+
+        let parts = sahl_core::sale::by_lines(&active, &line_totals, &[vec![id(11)], vec![id(12)]])
+            .expect("splits");
+
+        let summed: i64 = parts.iter().map(|part| part.amount.minor()).sum();
+        assert_eq!(
+            summed,
+            totals.total.minor(),
+            "the discount lands where the engine put it"
+        );
+    }
+
+    #[test]
+    fn a_voided_line_is_excluded_from_both_sides_of_a_split() {
+        // The aggregate's active lines and the engine's calculated lines must be the same set, or a
+        // split charges one line's money against another's id.
+        let mut till = fresh();
+        till.record(&opened(), id(80), at(0)).expect("opens");
+        till.record(&line(10_000), id(81), at(1)).expect("adds");
+        till.record(
+            &SaleEvent::LineAdded {
+                sale_id: id(SALE),
+                line_id: id(12),
+                product_id: id(13),
+                name: "Tea".to_owned(),
+                unit_price: Money::from_minor(20_000, BDT),
+                quantity: Quantity::ONE,
+                tax_class: TaxClass::standard(1500),
+                modifiers: Vec::new(),
+            },
+            id(82),
+            at(2),
+        )
+        .expect("adds");
+        till.record(
+            &SaleEvent::LineVoided {
+                sale_id: id(SALE),
+                line_id: id(11),
+                reason: sahl_core::sale::VoidReason::Mistake,
+                authorized_by: id(MANAGER),
+            },
+            id(83),
+            at(3),
+        )
+        .expect("voids");
+
+        let sale = till.sale(id(SALE)).expect("sale");
+        let totals = sale.totals().expect("totals");
+        let line_totals: Vec<Money> = totals.lines.iter().map(|line| line.total).collect();
+        let active: Vec<sahl_core::sale::SaleLine> = sale.active_lines().cloned().collect();
+
+        assert_eq!(active.len(), 1, "the voided line is not on either side");
+        assert_eq!(line_totals.len(), 1);
+
+        let parts =
+            sahl_core::sale::by_lines(&active, &line_totals, &[vec![id(12)]]).expect("splits");
+        assert_eq!(parts[0].amount, totals.total);
+    }
 }

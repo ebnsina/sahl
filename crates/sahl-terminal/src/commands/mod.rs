@@ -2215,3 +2215,77 @@ pub fn discard_empty_tickets(
 
     Ok(discarded)
 }
+
+// -------------------------------------------------------------------------------------------
+// Splitting a bill
+// -------------------------------------------------------------------------------------------
+
+/// One person's share.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SplitPartView {
+    pub number: u32,
+    pub amount_minor: i64,
+    /// The lines this part covers. Empty for an even split, where nobody pays for anything named.
+    pub line_ids: Vec<Uuid>,
+}
+
+/// Work out what each share of a bill should be.
+///
+/// A split is arithmetic, not a new kind of transaction: three people paying separately is three
+/// tenders against one sale, which the sale has supported since P1. Nothing is recorded here — the
+/// ordinary tender path takes it from the amounts this returns.
+///
+/// `line_assignment` empty means split evenly `ways` times. Otherwise it gives, per part, the lines
+/// that part is paying for, and every active line must appear exactly once.
+#[tauri::command]
+pub fn split_bill(
+    state: tauri::State<'_, TerminalState>,
+    sale_id: Uuid,
+    ways: u32,
+    line_assignment: Vec<Vec<Uuid>>,
+) -> Result<Vec<SplitPartView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let sale = terminal.sale(sale_id)?;
+    let totals = sale.totals().map_err(|error| CommandError {
+        code: "rejected",
+        message: error.to_string(),
+    })?;
+
+    let parts = if line_assignment.is_empty() {
+        sahl_core::sale::evenly(totals.total, ways).map_err(|error| CommandError {
+            code: "rejected",
+            message: error.to_string(),
+        })?
+    } else {
+        // Line totals come from the calculated order rather than being recomputed, so an
+        // apportioned order discount lands exactly where the tax engine put it.
+        let line_totals: Vec<sahl_core::Money> =
+            totals.lines.iter().map(|line| line.total).collect();
+
+        // `totals.lines` covers active lines only, so the voided ones are filtered out of the
+        // aggregate's list too — otherwise the two would be misaligned and a split would charge
+        // one line's money against another's id.
+        let active: Vec<sahl_core::sale::SaleLine> = sale.active_lines().cloned().collect();
+
+        sahl_core::sale::by_lines(&active, &line_totals, &line_assignment).map_err(|error| {
+            CommandError {
+                code: "bad_split",
+                message: error.to_string(),
+            }
+        })?
+    };
+
+    Ok(parts
+        .into_iter()
+        .map(|part| SplitPartView {
+            number: part.number,
+            amount_minor: part.amount.minor(),
+            line_ids: part.line_ids,
+        })
+        .collect())
+}

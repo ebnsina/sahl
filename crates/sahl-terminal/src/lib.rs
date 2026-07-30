@@ -166,6 +166,7 @@ pub fn run() {
             commands::seat_sale,
             commands::open_tickets,
             commands::discard_empty_tickets,
+            commands::split_bill,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");
