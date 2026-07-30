@@ -4050,6 +4050,79 @@ mod tests {
     }
 
     #[test]
+    fn a_pasted_spreadsheet_becomes_products_that_scan_and_sell() {
+        // The onboarding claim, end to end: a file goes in, and what comes out is sellable —
+        // priced in the outlet's currency, findable by barcode, taxed the way the file said.
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
+        let before = till.catalogue().all().len();
+
+        let import = sahl_core::catalogue::from_delimited(
+            "Name,Price,Barcode,Unit,VAT\n             Turmeric,320.00,8905001,kg,15\n             Fresh bread,45.00,8905002,pcs,zero\n",
+            ',',
+            BDT,
+            1500,
+        )
+        .expect("parses");
+
+        assert!(import.is_clean(), "{:?}", import.problems);
+
+        for (index, row) in import.products.iter().enumerate() {
+            till.record_catalogue(
+                &sahl_core::catalogue::CatalogueEvent::ProductAdded {
+                    product_id: id(0x9000 + index as u128),
+                    details: sahl_core::catalogue::ProductDetails {
+                        name: row.name.clone(),
+                        sku: row.sku.clone(),
+                        barcodes: row.barcodes.clone(),
+                        price: row.price,
+                        unit: row.unit,
+                        tax_class: row.tax_class,
+                        category: row.category.clone(),
+                        station: None,
+                        option_groups: Vec::new(),
+                    },
+                    at: at(10),
+                    added_by: id(0x0E),
+                },
+                id(0x9100 + index as u128),
+                at(10),
+            )
+            .expect("adds");
+        }
+
+        assert_eq!(till.catalogue().all().len(), before + 2);
+
+        let bread = till.catalogue().by_barcode("8905002").expect("scans");
+        assert_eq!(bread.price, Money::from_minor(4_500, BDT));
+        assert_eq!(
+            bread.tax_class,
+            sahl_core::tax::TaxClass::ZeroRated,
+            "zero-rated, not a standard rate of zero"
+        );
+    }
+
+    #[test]
+    fn an_import_priced_in_the_outlets_currency_is_not_taka_by_default() {
+        // A column of bare numbers says nothing about what they are denominated in.
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Gulf, at(0)).expect("seeds");
+
+        let import = sahl_core::catalogue::from_delimited(
+            "Name,Price\nMint tea,9.00\n",
+            ',',
+            till.currency().expect("configured"),
+            1500,
+        )
+        .expect("parses");
+
+        assert_eq!(
+            import.products[0].price.currency(),
+            sahl_core::Currency::Sar
+        );
+    }
+
+    #[test]
     fn the_challan_takes_its_unit_of_supply_from_the_catalogue() {
         // The reason the catalogue had to exist before a challan could be right: every line printed
         // "pcs" regardless, and Unit of Supply is a column on the form.

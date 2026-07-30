@@ -15,7 +15,7 @@
 	const format = $derived(
 		createFormatters({
 			locale: 'en',
-			currency: (data.today?.currency ?? 'BDT') as CurrencyCode,
+			currency: (data.today?.day.currency ?? 'BDT') as CurrencyCode,
 			timeZone: 'UTC'
 		})
 	);
@@ -55,7 +55,9 @@
 			<p class="text-body">{data.error}</p>
 		</div>
 	{:else if data.today}
-		{@const today = data.today}
+		{@const today = data.today.day}
+		{@const nameOf = (id: string) =>
+			data.today?.staff.find((member) => member.id === id)?.name ?? 'Unknown'}
 		<div class="flex flex-col gap-4 p-4">
 			<Card label="Takings">
 				<div class="grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -123,12 +125,7 @@
 						{#each today.by_cashier as row (row.staff_id)}
 							<div class="border-border flex items-center gap-3 border-b px-3 py-2">
 								<div class="min-w-0 flex-1">
-									<!-- Ids, not names: staff live in the event log, and the server does not yet
-									     project the directory. Better a number the owner can match against the
-									     till than a name this build guessed at. -->
-									<p class="text-body truncate">
-										<span class="numeric">{row.staff_id.slice(0, 8)}</span>
-									</p>
+									<p class="text-body truncate">{nameOf(row.staff_id)}</p>
 									<p class="text-secondary text-text-muted">
 										{format.integer(row.sales)} sales · {format.integer(row.voids)} voided
 									</p>

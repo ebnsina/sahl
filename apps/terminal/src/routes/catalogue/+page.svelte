@@ -13,8 +13,10 @@
 		Badge,
 		Button,
 		Card,
+		Checkbox,
 		Field,
 		Input,
+		Numeric,
 		Select,
 		minorToDecimalString,
 		parseMinor
@@ -23,6 +25,7 @@
 	import { loadShop, shop } from '$lib/outlet.svelte';
 	import {
 		asTillError,
+		type ImportPreview,
 		isTillAvailable,
 		till,
 		type ModifierGroup,
@@ -67,6 +70,14 @@
 	/** The product being edited, or `null` when adding a new one. */
 	let editing = $state<ProductView | null>(null);
 	let showForm = $state(false);
+
+	/** Pasting a spreadsheet. Previewed first, always — see `preview_import`. */
+	let showImport = $state(false);
+	let importText = $state('');
+	let importTabs = $state(false);
+	let preview = $state<ImportPreview | null>(null);
+	let pendingImport = $state(false);
+	let imported = $state<number | null>(null);
 
 	let name = $state('');
 	let sku = $state('');
@@ -194,6 +205,39 @@
 		}
 		approvalError = null;
 		pendingSave = true;
+	}
+
+	function runPreview() {
+		imported = null;
+		void run(
+			() => till.previewImport(importText, importTabs),
+			(result) => (preview = result)
+		);
+	}
+
+	function confirmImport(pin: string) {
+		void (async () => {
+			busy = true;
+			approvalError = null;
+			try {
+				imported = await till.commitImport(importText, importTabs, pin);
+				pendingImport = false;
+				showImport = false;
+				importText = '';
+				preview = null;
+				products = await till.allProducts();
+			} catch (thrown) {
+				const failure = asTillError(thrown);
+				if (failure.code === 'not_authorized' || failure.code === 'no_approver') {
+					approvalError = failure.message;
+				} else {
+					pendingImport = false;
+					error = failure;
+				}
+			} finally {
+				busy = false;
+			}
+		})();
 	}
 
 	function confirmSave(pin: string) {
@@ -632,7 +676,141 @@
 							</div>
 						</div>
 					</Card>
+				{:else if showImport}
+					<Card label="Import a spreadsheet">
+						<div class="flex flex-col gap-3">
+							<p class="text-secondary text-text-secondary">
+								Paste the file. The first row must name the columns — <span class="numeric"
+									>Name</span
+								>
+								and <span class="numeric">Price</span> at minimum, plus any of SKU, Barcode, Unit, VAT
+								and Category.
+							</p>
+
+							<Checkbox bind:checked={importTabs} label="Tabs rather than commas" />
+							<p class="text-secondary text-text-muted -mt-2 ps-6">
+								What a copy straight out of a spreadsheet produces.
+							</p>
+
+							<textarea
+								bind:value={importText}
+								rows="8"
+								placeholder={'Name,Price,Unit\nRice,46.00,kg'}
+								class="border-border bg-surface text-body numeric w-full border p-2"
+								dir="ltr"></textarea>
+
+							<div class="flex gap-2">
+								<Button
+									variant="secondary"
+									onclick={runPreview}
+									disabled={busy || !importText.trim()}
+								>
+									Check the file
+								</Button>
+								<Button
+									variant="ghost"
+									onclick={() => {
+										showImport = false;
+										preview = null;
+										importText = '';
+									}}
+								>
+									Cancel
+								</Button>
+							</div>
+
+							{#if preview}
+								{#if preview.problems.length > 0}
+									<!-- Every problem at once. Fixing one per attempt is what makes an import
+									     wizard something people abandon. -->
+									<div class="border-danger bg-danger-subtle border p-3">
+										<p class="label-caps">
+											{format.integer(preview.problems.length)} rows need fixing — nothing has been imported
+										</p>
+										<div class="mt-2 flex flex-col gap-1">
+											{#each preview.problems.slice(0, 20) as problem (problem.line + problem.column)}
+												<p class="text-secondary">
+													<span class="numeric">Line {format.integer(problem.line)}</span>
+													· {problem.column}
+													{#if problem.found}
+														· <span class="numeric">{problem.found}</span>
+													{/if}
+													— {problem.because}
+												</p>
+											{/each}
+											{#if preview.problems.length > 20}
+												<p class="text-secondary text-text-muted">
+													…and {format.integer(preview.problems.length - 20)} more.
+												</p>
+											{/if}
+										</div>
+									</div>
+								{:else}
+									<div class="border-success bg-success-subtle border p-3">
+										<p class="label-caps">
+											{format.integer(preview.products.length)} products ready
+										</p>
+										{#if preview.duplicates.length > 0}
+											<p class="text-secondary mt-1">
+												{format.integer(preview.duplicates.length)} of these names are already in the
+												catalogue. Importing adds them again rather than replacing them.
+											</p>
+										{/if}
+									</div>
+
+									<div class="border-border max-h-64 overflow-y-auto border">
+										{#each preview.products.slice(0, 50) as row (row.name + row.priceMinor)}
+											<div class="border-border flex items-center gap-3 border-b px-3 py-1.5">
+												<span class="text-body min-w-0 flex-1 truncate">{row.name}</span>
+												<span class="text-secondary text-text-muted">{row.unit}</span>
+												<Numeric value={format.moneyPlain(row.priceMinor)} />
+											</div>
+										{/each}
+									</div>
+
+									<Button
+										variant="primary"
+										size="lg"
+										block
+										disabled={busy || preview.products.length === 0}
+										onclick={() => {
+											approvalError = null;
+											pendingImport = true;
+										}}
+									>
+										Import {format.integer(preview.products.length)} products
+									</Button>
+								{/if}
+							{/if}
+						</div>
+					</Card>
 				{:else}
+					{#if imported !== null}
+						<Card label="Imported">
+							<p class="text-body">
+								{format.integer(imported)} products added to the catalogue.
+							</p>
+						</Card>
+					{/if}
+
+					<Card label="Start from a spreadsheet">
+						<p class="text-secondary text-text-secondary">
+							Paste an export from whatever the shop uses now, or the file a supplier sends. The
+							file is checked before anything is written.
+						</p>
+						<Button
+							variant="secondary"
+							block
+							class="mt-3"
+							onclick={() => {
+								showImport = true;
+								imported = null;
+							}}
+						>
+							Import a spreadsheet
+						</Button>
+					</Card>
+
 					<Card label="About prices">
 						<p class="text-secondary text-text-secondary">
 							The price here is the current price. Every sale records what it actually charged, so
@@ -643,6 +821,19 @@
 				{/if}
 			</div>
 		</div>
+	{/if}
+
+	{#if pendingImport}
+		<PinPrompt
+			action={`Import ${preview?.products.length ?? 0} products`}
+			{busy}
+			error={approvalError}
+			onsubmit={confirmImport}
+			oncancel={() => {
+				pendingImport = false;
+				approvalError = null;
+			}}
+		/>
 	{/if}
 
 	{#if pendingSave}

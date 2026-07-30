@@ -10,10 +10,12 @@
 
 mod book;
 mod event;
+mod import;
 mod options;
 mod product;
 
 pub use book::Catalogue;
 pub use event::{CatalogueEvent, ProductDetails};
+pub use import::{Import, ImportError, ImportProblem, ImportedProduct, from_delimited};
 pub use options::{ModifierGroup, ModifierOption};
 pub use product::{CatalogueError, Product, Unit};

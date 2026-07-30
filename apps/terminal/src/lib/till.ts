@@ -284,6 +284,23 @@ export interface ZatcaLineView {
 	totalWithVatMinor: number;
 }
 
+/** What a pasted spreadsheet turned out to contain. */
+export interface ImportPreview {
+	products: Array<{
+		name: string;
+		sku: string | null;
+		barcodes: string[];
+		priceMinor: number;
+		unit: string;
+		taxTreatment: TaxTreatment;
+		taxBasisPoints: number;
+		category: string | null;
+	}>;
+	problems: Array<{ line: number; column: string; found: string; because: string }>;
+	/** Names already in the catalogue — worth knowing before the shelf doubles. */
+	duplicates: string[];
+}
+
 /** A day, totalled. Every figure is computed in Rust; this only displays them. */
 export interface DayView {
 	currency: string;
@@ -617,6 +634,14 @@ export const till = {
 	}) => call<StaffView[]>('enrol_staff', input),
 
 	auditFeed: () => call<AuditView[]>('audit_feed'),
+
+	/** Read a pasted file without writing anything. Always previewed before it is committed. */
+	previewImport: (text: string, tabSeparated: boolean) =>
+		call<ImportPreview>('preview_import', { text, tabSeparated }),
+
+	/** Write a previewed import. Re-parses the file rather than trusting the preview. */
+	commitImport: (text: string, tabSeparated: boolean, pin: string) =>
+		call<number>('commit_import', { text, tabSeparated, pin }),
 
 	/** A day, totalled. The same arithmetic the till sells with — never recomputed here. */
 	dayReport: () => call<DayView>('day_report'),

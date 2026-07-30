@@ -1216,6 +1216,199 @@ pub struct FindingView {
     pub summary: String,
 }
 
+/// What a pasted spreadsheet turned out to contain.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub products: Vec<ImportRowView>,
+    pub problems: Vec<ImportProblemView>,
+    /// Names already in the catalogue. Not an error — re-importing a corrected file is the normal
+    /// way to fix one — but the owner should know before they double the shelf.
+    pub duplicates: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRowView {
+    pub name: String,
+    pub sku: Option<String>,
+    pub barcodes: Vec<String>,
+    pub price_minor: i64,
+    pub unit: &'static str,
+    pub tax_treatment: &'static str,
+    pub tax_basis_points: i32,
+    pub category: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportProblemView {
+    pub line: usize,
+    pub column: &'static str,
+    pub found: String,
+    pub because: String,
+}
+
+/// Read a pasted file without writing anything.
+///
+/// Always a preview first. An import that wrote as it parsed would leave half a catalogue behind
+/// on the first bad row — and half a catalogue looks like a working shop, so the missing half is
+/// discovered at the counter one product at a time.
+#[tauri::command]
+pub fn preview_import(
+    state: tauri::State<'_, TerminalState>,
+    text: String,
+    tab_separated: bool,
+) -> Result<ImportPreview, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let currency = terminal.currency()?;
+    // The outlet's standard rate, for a file with no VAT column. Read from what the shop already
+    // sells rather than assumed — a Riyadh café is 15% and a Dhaka grocery is 15%, but neither is
+    // a number this code should be choosing.
+    let default_rate = terminal
+        .catalogue()
+        .sellable()
+        .iter()
+        .find_map(|product| match product.tax_class {
+            TaxClass::Standard { rate } => Some(rate.basis_points()),
+            _ => None,
+        })
+        .unwrap_or(1500);
+
+    let import = sahl_core::catalogue::from_delimited(
+        &text,
+        if tab_separated { '\t' } else { ',' },
+        currency,
+        default_rate,
+    )
+    .map_err(|error| CommandError {
+        code: "bad_file",
+        message: error.to_string(),
+    })?;
+
+    let existing: std::collections::BTreeSet<String> = terminal
+        .catalogue()
+        .all()
+        .iter()
+        .map(|product| product.name.to_lowercase())
+        .collect();
+
+    Ok(ImportPreview {
+        duplicates: import
+            .products
+            .iter()
+            .filter(|row| existing.contains(&row.name.to_lowercase()))
+            .map(|row| row.name.clone())
+            .collect(),
+        products: import.products.iter().map(ImportRowView::of).collect(),
+        problems: import
+            .problems
+            .iter()
+            .map(|problem| ImportProblemView {
+                line: problem.line,
+                column: problem.column,
+                found: problem.found.clone(),
+                because: problem.because.clone(),
+            })
+            .collect(),
+    })
+}
+
+impl ImportRowView {
+    fn of(row: &sahl_core::catalogue::ImportedProduct) -> Self {
+        let (tax_treatment, tax_basis_points) = match row.tax_class {
+            TaxClass::Standard { rate } => ("standard", rate.basis_points()),
+            TaxClass::ZeroRated => ("zero_rated", 0),
+            TaxClass::Exempt => ("exempt", 0),
+        };
+        Self {
+            name: row.name.clone(),
+            sku: row.sku.clone(),
+            barcodes: row.barcodes.clone(),
+            price_minor: row.price.minor(),
+            unit: row.unit.label(),
+            tax_treatment,
+            tax_basis_points,
+            category: row.category.clone(),
+        }
+    }
+}
+
+/// Write a previewed import into the catalogue.
+///
+/// Refuses a file with any unresolved problem. Re-parsed here rather than trusting what the screen
+/// sends back: a preview the user edited in devtools is not what they were shown, and the file is
+/// the thing they actually approved.
+#[tauri::command]
+pub fn commit_import(
+    state: tauri::State<'_, TerminalState>,
+    text: String,
+    tab_separated: bool,
+    pin: String,
+) -> Result<usize, CommandError> {
+    let added_by = authorize(&state, Permission::EditCatalogue, &pin)?;
+    let preview = preview_import(state.clone(), text.clone(), tab_separated)?;
+
+    if !preview.problems.is_empty() {
+        return Err(CommandError {
+            code: "not_clean",
+            message: format!(
+                "{} rows still need fixing — nothing was imported",
+                preview.problems.len()
+            ),
+        });
+    }
+
+    let currency = {
+        let terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+        terminal.currency()?
+    };
+
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let mut written = 0_usize;
+    for row in &preview.products {
+        let details = ProductDetails {
+            name: row.name.clone(),
+            sku: row.sku.clone(),
+            barcodes: row.barcodes.clone(),
+            price: Money::from_minor(row.price_minor, currency),
+            unit: Unit::from_label(row.unit).map_err(|_| CommandError {
+                code: "bad_unit",
+                message: format!("{} is not a unit of supply", row.unit),
+            })?,
+            tax_class: tax_class(row.tax_treatment, row.tax_basis_points)?,
+            category: row.category.clone(),
+            station: None,
+            option_groups: Vec::new(),
+        };
+
+        terminal.record_catalogue(
+            &CatalogueEvent::ProductAdded {
+                product_id: new_id(),
+                details,
+                at: now(),
+                added_by,
+            },
+            new_id(),
+            now(),
+        )?;
+        written = written.saturating_add(1);
+    }
+
+    Ok(written)
+}
+
 /// A day, totalled — takings, tax, who rang what, what sold.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -190,7 +190,8 @@ async fn a_token_reads_its_own_shops_day() {
         .expect("request");
 
     assert_eq!(response.status(), 200);
-    let day: sahl_core::report::Day = response.json().await.expect("json");
+    let report: serde_json::Value = response.json().await.expect("json");
+    let day: sahl_core::report::Day = serde_json::from_value(report["day"].clone()).expect("day");
     assert_eq!(day.sales, 1);
     assert_eq!(day.takings, Money::from_minor(11_500, BDT));
     assert_eq!(day.tax, Money::from_minor(1_500, BDT), "15% of the base");
@@ -250,9 +251,14 @@ async fn a_tenant_wide_token_still_cannot_reach_another_tenant() {
         .expect("request");
 
     assert_eq!(response.status(), 200, "not refused — simply empty");
-    let day: sahl_core::report::Day = response.json().await.expect("json");
+    let report: serde_json::Value = response.json().await.expect("json");
+    let day: sahl_core::report::Day = serde_json::from_value(report["day"].clone()).expect("day");
     assert_eq!(day.sales, 0, "another tenant's events are not visible");
     assert_eq!(day.takings.minor(), 0);
+    assert!(
+        report["staff"].as_array().is_some_and(Vec::is_empty),
+        "and no staff either"
+    );
 }
 
 #[tokio::test]

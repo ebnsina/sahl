@@ -90,6 +90,27 @@ pub struct DayQuery {
     pub to: Option<i64>,
 }
 
+/// A day, and enough of the staff directory to read it.
+///
+/// The names travel with the report rather than being fetched separately. A dashboard that asked
+/// twice would render a table of ids first and names a moment later, and on a slow connection the
+/// owner reads the ids.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayReport {
+    pub day: sahl_core::report::Day,
+    /// Who the ids in `day` refer to. Everyone the log names, including people who have left —
+    /// a departed cashier's sales are still part of the day they happened in.
+    pub staff: Vec<StaffRow>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaffRow {
+    pub id: Uuid,
+    pub name: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OutletRow {
@@ -179,7 +200,7 @@ pub async fn day(
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
-    let events: Vec<SaleEvent> = rows
+    let sale_events: Vec<SaleEvent> = rows
         .into_iter()
         .filter_map(|row| {
             let payload: serde_json::Value = row.try_get("payload").ok()?;
@@ -189,19 +210,63 @@ pub async fn day(
         })
         .collect();
 
-    let Ok(book) = SaleBook::replay(&events) else {
+    let Ok(book) = SaleBook::replay(&sale_events) else {
         return StatusCode::UNPROCESSABLE_ENTITY.into_response();
     };
+
+    // The directory is read over all time, not over the reported window: somebody enrolled last
+    // year rang sales today, and a name is not a thing that happened on a date.
+    let staff_rows = sqlx::query(
+        "SELECT payload FROM event WHERE outlet_id = $1 AND kind LIKE 'staff.%' \
+         ORDER BY occurred_at, device_seq",
+    )
+    .bind(outlet)
+    .fetch_all(
+        match sqlx::Acquire::acquire(&mut reader.transaction).await {
+            Ok(connection) => connection,
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        },
+    )
+    .await
+    .unwrap_or_default();
+
+    let staff_events: Vec<sahl_core::staff::StaffEvent> = staff_rows
+        .into_iter()
+        .filter_map(|row| {
+            let payload: serde_json::Value = row.try_get("payload").ok()?;
+            serde_json::from_value(payload).ok()
+        })
+        .collect();
+
+    // A directory that will not replay is not a reason to withhold the day. The report degrades to
+    // ids, which is what it showed before names existed.
+    let directory = sahl_core::staff::Directory::replay(&staff_events).unwrap_or_default();
 
     let sales: Vec<&sahl_core::Sale> = book.completed().collect();
     // The currency comes from the sales themselves. The outlet's configuration lives in the event
     // log too, but a day that contains sales already knows what it was rung in.
     let Some(currency) = sales.first().map(|sale| sale.currency()) else {
-        return Json(sahl_core::report::Day::empty(sahl_core::Currency::Bdt)).into_response();
+        return Json(DayReport {
+            day: sahl_core::report::Day::empty(sahl_core::Currency::Bdt),
+            staff: Vec::new(),
+        })
+        .into_response();
     };
 
     match sahl_core::report::Day::of(&sales, currency) {
-        Ok(day) => Json(day).into_response(),
+        Ok(day) => {
+            let staff = day
+                .by_cashier
+                .iter()
+                .map(|row| StaffRow {
+                    id: row.staff_id,
+                    name: directory
+                        .get(row.staff_id)
+                        .map_or_else(|| "Unknown".to_owned(), |member| member.name.clone()),
+                })
+                .collect();
+            Json(DayReport { day, staff }).into_response()
+        }
         Err(_) => StatusCode::UNPROCESSABLE_ENTITY.into_response(),
     }
 }

@@ -175,6 +175,8 @@ pub fn run() {
             commands::audit_feed,
             commands::anomaly_feed,
             commands::day_report,
+            commands::preview_import,
+            commands::commit_import,
             commands::place_order,
             commands::receive_against_order,
             commands::close_order,

@@ -42,6 +42,12 @@ export interface Day {
 	}>;
 }
 
+/** A day, and who the ids in it refer to. */
+export interface DayReport {
+	day: Day;
+	staff: Array<{ id: string; name: string }>;
+}
+
 export interface Outlet {
 	id: string;
 	name: string;
@@ -75,9 +81,9 @@ export function day(
 	outlet: string,
 	range: { from?: number; to?: number },
 	fetcher: typeof fetch
-): Promise<Day> {
+): Promise<DayReport> {
 	const query = new URLSearchParams({ outlet });
 	if (range.from !== undefined) query.set('from', String(range.from));
 	if (range.to !== undefined) query.set('to', String(range.to));
-	return read<Day>(`/api/report/day?${query.toString()}`, token, fetcher);
+	return read<DayReport>(`/api/report/day?${query.toString()}`, token, fetcher);
 }
