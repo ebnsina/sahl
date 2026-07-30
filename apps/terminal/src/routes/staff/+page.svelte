@@ -9,8 +9,9 @@
 	 * The first person enrolled needs no approval — there is nobody yet to give it. Everyone after
 	 * them needs an owner's PIN, and the till enforces that, not this screen.
 	 */
-	import { Badge, Button, Card, Field, Input, Numeric, Select, createFormatters } from '@sahl/ui';
+	import { Badge, Button, Card, Field, Input, Numeric, Select } from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
+	import { loadShop, shop } from '$lib/outlet.svelte';
 	import {
 		asTillError,
 		isTillAvailable,
@@ -20,7 +21,8 @@
 		type StaffView
 	} from '$lib/till';
 
-	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
+	// The outlet's own currency and timezone, not this screen's guess.
+	const format = $derived(shop.formatters);
 
 	const ROLES: Array<{ value: StaffView['role']; label: string; note: string }> = [
 		{
@@ -93,6 +95,7 @@
 	$effect(() => {
 		available = isTillAvailable();
 		if (available) {
+			void loadShop();
 			void run(refresh);
 			void till.canSeed().then((allowed) => (canSeed = allowed));
 		}

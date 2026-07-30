@@ -10,11 +10,13 @@
 	 * Only shown for a café. The capability comes from the outlet's profile, which is a row rather
 	 * than a branch — a retail outlet simply has no tables and never sees this.
 	 */
-	import { Badge, Button, Card, Field, Input, createFormatters } from '@sahl/ui';
+	import { Badge, Button, Card, Field, Input } from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
+	import { loadShop, shop } from '$lib/outlet.svelte';
 	import { asTillError, isTillAvailable, till, type OutletView, type TableView } from '$lib/till';
 
-	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
+	// The outlet's own currency and timezone, not this screen's guess.
+	const format = $derived(shop.formatters);
 
 	let tables = $state<TableView[]>([]);
 	let outlet = $state<OutletView | null>(null);
@@ -57,6 +59,7 @@
 	$effect(() => {
 		available = isTillAvailable();
 		if (available) {
+			void loadShop();
 			void run(async () => {
 				tables = await till.floorPlan(true);
 				outlet = await till.outletConfig();

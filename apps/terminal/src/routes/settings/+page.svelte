@@ -20,17 +20,18 @@
 		Input,
 		Logo,
 		Select,
-		createFormatters,
 		minorToDecimalString,
 		parseMinor
 	} from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
+	import { loadShop, shop } from '$lib/outlet.svelte';
 	import { asTillError, isTillAvailable, till, type OutletView } from '$lib/till';
 
 	/** Baked in at build time by Vite — the same string the installer carries. */
 	const VERSION = __APP_VERSION__;
 
-	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
+	// The outlet's own currency and timezone, not this screen's guess.
+	const format = $derived(shop.formatters);
 
 	const PROFILES: Array<{ value: OutletView['profile']; label: string; note: string }> = [
 		{

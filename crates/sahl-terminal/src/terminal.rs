@@ -100,6 +100,10 @@ pub enum TerminalError {
     #[error("nobody with that role may do this")]
     Denied,
 
+    /// Setup has not been done, so the till does not know what it trades in.
+    #[error("set the outlet up before selling — it decides the currency")]
+    NotConfigured,
+
     #[error("no shift is open")]
     NoOpenShift,
 
@@ -533,6 +537,21 @@ impl Terminal {
         self.seal(event, event_id, occurred_at)?;
         self.outlet = Some(config);
         Ok(())
+    }
+
+    /// What this outlet trades in.
+    ///
+    /// Every amount the till creates is in this currency. Refused rather than defaulted when setup
+    /// has not been done: a figure in a currency nobody chose is a number with no meaning, and
+    /// every total built on it inherits that.
+    ///
+    /// # Errors
+    /// [`TerminalError::NotConfigured`] before setup.
+    pub fn currency(&self) -> Result<sahl_core::Currency, TerminalError> {
+        self.outlet
+            .as_ref()
+            .map(|outlet| outlet.currency)
+            .ok_or(TerminalError::NotConfigured)
     }
 
     /// How this outlet trades, once it has been set up.
@@ -1046,6 +1065,24 @@ impl Terminal {
 }
 
 impl Terminal {
+    /// Fill this till with a demo shop, stamped from the system clock. **Debug builds only.**
+    ///
+    /// # Errors
+    /// [`TerminalError`] if any seeded event is refused.
+    #[cfg(debug_assertions)]
+    pub fn seed_now(&mut self, market: crate::seed::Market) -> Result<(), TerminalError> {
+        let now = Timestamp::from_millis(
+            i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or_default(),
+        );
+        crate::seed::seed(self, market, now)
+    }
+
     /// Erase every event and every projection. **Debug builds only.**
     ///
     /// Rebuilds the in-memory state from nothing rather than reloading, so the running till is
@@ -3818,6 +3855,25 @@ mod tests {
     }
 
     #[test]
+    fn neither_seeded_market_contains_an_action_the_till_would_have_refused() {
+        // The seed writes events straight to the log rather than through the command layer, so it
+        // has to reach the same approver that layer would. It did not: a café void above the void
+        // limit was recorded as self-approved, and the feed reported a control being bypassed that
+        // cannot be bypassed. Bangladesh passed only because its limits are higher and the seeded
+        // baskets happened not to cross them — the test below now covers both.
+        for market in [crate::seed::Market::Bangladesh, crate::seed::Market::Gulf] {
+            let mut till = fresh();
+            crate::seed::seed(&mut till, market, at(0)).expect("seeds");
+
+            let findings = till.anomalies().expect("scans");
+            assert!(
+                findings.iter().all(|f| f.kind != "self_approved"),
+                "{market:?}: {findings:#?}"
+            );
+        }
+    }
+
+    #[test]
     fn the_seeded_day_gives_the_feed_exactly_one_thing_to_say() {
         // The seed deliberately has one cashier voiding far more than the other, because a feed
         // that showed nothing would demonstrate a working feature by being empty. What it must
@@ -3915,6 +3971,39 @@ mod tests {
 
         assert!(reloaded.staff().is_empty());
         assert!(reloaded.outlet().is_none());
+    }
+
+    #[test]
+    fn a_riyal_outlet_sells_in_riyals() {
+        // The bug this pins: the till opened every sale in taka whatever the outlet traded in, so
+        // the first line added to a Riyadh sale failed on a currency mismatch. The shop could not
+        // sell at all, and nothing said why until the line was already being added.
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Gulf, at(0)).expect("seeds");
+
+        assert_eq!(
+            till.currency().expect("configured"),
+            sahl_core::Currency::Sar
+        );
+
+        let sale = till
+            .book()
+            .completed()
+            .next()
+            .expect("the seeded day sold something");
+        assert_eq!(sale.currency(), sahl_core::Currency::Sar);
+        assert_eq!(
+            sale.totals().expect("totals").total.currency(),
+            sahl_core::Currency::Sar
+        );
+    }
+
+    #[test]
+    fn a_till_that_has_never_been_set_up_refuses_to_name_a_currency() {
+        // Refused rather than defaulted. A sale in a currency nobody chose is a number with no
+        // meaning, and every total built on it inherits that.
+        let till = fresh();
+        assert!(matches!(till.currency(), Err(TerminalError::NotConfigured)));
     }
 
     #[test]

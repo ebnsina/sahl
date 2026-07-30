@@ -16,11 +16,11 @@
 		Field,
 		Input,
 		Select,
-		createFormatters,
 		minorToDecimalString,
 		parseMinor
 	} from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
+	import { loadShop, shop } from '$lib/outlet.svelte';
 	import {
 		asTillError,
 		isTillAvailable,
@@ -30,7 +30,8 @@
 		type TaxTreatment
 	} from '$lib/till';
 
-	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
+	// The outlet's own currency and timezone, not this screen's guess.
+	const format = $derived(shop.formatters);
 
 	const UNITS = [
 		{ value: 'pcs', label: 'Pieces' },
@@ -122,6 +123,7 @@
 	$effect(() => {
 		available = isTillAvailable();
 		if (available) {
+			void loadShop();
 			void run(
 				() => till.allProducts(),
 				(result) => (products = result)
@@ -185,7 +187,7 @@
 			error = { code: 'bad_name', message: 'Enter a product name' };
 			return;
 		}
-		const priceMinor = parseMinor(price, 'BDT');
+		const priceMinor = parseMinor(price, shop.currency ?? 'BDT');
 		if (priceMinor === null || priceMinor < 0) {
 			error = { code: 'bad_price', message: 'Enter a price like 480 or 479.50' };
 			return;
@@ -195,7 +197,7 @@
 	}
 
 	function confirmSave(pin: string) {
-		const priceMinor = parseMinor(price, 'BDT');
+		const priceMinor = parseMinor(price, shop.currency ?? 'BDT');
 		if (priceMinor === null) return;
 
 		void (async () => {
@@ -220,7 +222,7 @@
 							id: option.id,
 							name: option.name,
 							// A delta can be negative — "no cheese, less 20" — so this parses signed.
-							priceDeltaMinor: parseMinor(option.price, 'BDT') ?? 0
+							priceDeltaMinor: parseMinor(option.price, shop.currency ?? 'BDT') ?? 0
 						}))
 					})),
 					unit,

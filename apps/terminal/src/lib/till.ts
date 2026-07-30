@@ -469,7 +469,6 @@ export const till = {
 		/** Option ids chosen at the till. The till validates them against the product's groups. */
 		chosenOptions: string[];
 		quantityMilli: number;
-		currency: string;
 	}) => call<SaleView>('add_line', input),
 
 	changeQuantity: (saleId: string, lineId: string, quantityMilli: number) =>
@@ -483,7 +482,6 @@ export const till = {
 		saleId: string;
 		method: string;
 		amountMinor: number;
-		currency: string;
 		reference?: string | null;
 	}) => call<SaleView>('record_tender', input),
 

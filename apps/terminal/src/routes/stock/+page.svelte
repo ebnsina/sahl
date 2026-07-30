@@ -10,17 +10,8 @@
 	 * Quantities are thousandths of a unit throughout. Nothing here converts one; `parseQuantity`
 	 * decodes a typed string and `Intl` renders it back.
 	 */
-	import {
-		Badge,
-		Button,
-		Card,
-		Field,
-		Input,
-		Numeric,
-		Select,
-		createFormatters,
-		parseMinor
-	} from '@sahl/ui';
+	import { Badge, Button, Card, Field, Input, Numeric, Select, parseMinor } from '@sahl/ui';
+	import { loadShop, shop } from '$lib/outlet.svelte';
 	import {
 		asTillError,
 		isTillAvailable,
@@ -30,7 +21,8 @@
 		type StockView
 	} from '$lib/till';
 
-	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
+	// The outlet's own currency and timezone, not this screen's guess.
+	const format = $derived(shop.formatters);
 
 	// A stand-in catalogue until the real one lands, matching the sell screen's ids.
 	const PRODUCTS = [
@@ -90,6 +82,7 @@
 	$effect(() => {
 		available = isTillAvailable();
 		if (available) {
+			void loadShop();
 			void run(
 				() => till.stockPosition(),
 				(result) => (stock = result)
@@ -118,7 +111,7 @@
 			error = { code: 'bad_quantity', message: 'Enter a quantity like 10 or 2.5' };
 			return;
 		}
-		const unitCostMinor = parseMinor(unitCost, 'BDT');
+		const unitCostMinor = parseMinor(unitCost, shop.currency ?? 'BDT');
 		if (unitCostMinor === null || unitCostMinor < 0) {
 			error = { code: 'bad_amount', message: 'Enter a unit cost like 40 or 39.50' };
 			return;

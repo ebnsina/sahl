@@ -15,10 +15,10 @@
 		Input,
 		Numeric,
 		Select,
-		createFormatters,
 		minorToDecimalString,
 		parseMinor
 	} from '@sahl/ui';
+	import { loadShop, shop } from '$lib/outlet.svelte';
 	import {
 		asTillError,
 		isTillAvailable,
@@ -28,7 +28,8 @@
 		type OrderView
 	} from '$lib/till';
 
-	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
+	// The outlet's own currency and timezone, not this screen's guess.
+	const format = $derived(shop.formatters);
 
 	// A stand-in catalogue until the real one lands, matching the other screens' ids.
 	const PRODUCTS = [
@@ -90,6 +91,7 @@
 	$effect(() => {
 		available = isTillAvailable();
 		if (available) {
+			void loadShop();
 			void run(
 				() => till.orderList(),
 				(result) => (orders = result)
@@ -117,7 +119,7 @@
 		const lines: Array<{ productId: string; quantityMilli: number; unitCostMinor: number }> = [];
 		for (const draft of draftLines) {
 			const quantityMilli = parseQuantity(draft.quantity);
-			const unitCostMinor = parseMinor(draft.unitCost, 'BDT');
+			const unitCostMinor = parseMinor(draft.unitCost, shop.currency ?? 'BDT');
 			if (quantityMilli === null || quantityMilli <= 0) {
 				error = { code: 'bad_quantity', message: 'Every line needs a quantity like 10 or 2.5' };
 				return;
@@ -173,7 +175,7 @@
 		if (!target) return;
 
 		const quantityMilli = parseQuantity(receiveQuantity);
-		const unitCostMinor = parseMinor(receiveCost, 'BDT');
+		const unitCostMinor = parseMinor(receiveCost, shop.currency ?? 'BDT');
 		if (quantityMilli === null || quantityMilli <= 0) {
 			error = { code: 'bad_quantity', message: 'Enter what arrived, like 30 or 12.5' };
 			return;

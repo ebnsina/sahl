@@ -16,19 +16,10 @@
 	import Check from '@lucide/svelte/icons/check';
 	import Plus from '@lucide/svelte/icons/plus';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
-	import {
-		Badge,
-		Button,
-		Card,
-		Field,
-		Input,
-		Numeric,
-		Logo,
-		createFormatters,
-		parseMinor
-	} from '@sahl/ui';
+	import { Badge, Button, Card, Field, Input, Numeric, Logo, parseMinor } from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
 	import SignIn from '$lib/SignIn.svelte';
+	import { loadShop, shop } from '$lib/outlet.svelte';
 	import {
 		asTillError,
 		isTillAvailable,
@@ -49,7 +40,8 @@
 	/** The real catalogue, from the till. Empty until someone adds a product. */
 	let catalogue = $state<ProductView[]>([]);
 
-	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
+	// The outlet's own currency and timezone, not this screen's guess.
+	const format = $derived(shop.formatters);
 
 	let sale = $state<SaleView | null>(null);
 	/** The challan for the sale just completed, if this outlet issues one. */
@@ -116,6 +108,7 @@
 	$effect(() => {
 		available = isTillAvailable();
 		if (available) {
+			void loadShop();
 			// Asked, never assumed: a till that was asleep reports nobody the moment it is read.
 			void till.currentSession().then((member) => (who = member));
 			void run(
@@ -270,8 +263,7 @@
 					quantityMilli,
 					taxBasisPoints: item.taxBasisPoints,
 					taxTreatment: item.taxTreatment,
-					chosenOptions,
-					currency: 'BDT'
+					chosenOptions
 				}),
 			(result) => (sale = result)
 		);
@@ -371,8 +363,7 @@
 				till.recordTender({
 					saleId: current.id,
 					method: 'cash',
-					amountMinor,
-					currency: 'BDT'
+					amountMinor
 				}),
 			(result) => (sale = result)
 		);
@@ -381,13 +372,13 @@
 	function tenderCash() {
 		const current = sale;
 		if (!current) return;
-		const amountMinor = parseMinor(cashInput, 'BDT');
+		const amountMinor = parseMinor(cashInput, shop.currency ?? 'BDT');
 		if (amountMinor === null || amountMinor <= 0) {
 			error = { code: 'bad_amount', message: 'Enter a cash amount like 500 or 499.50' };
 			return;
 		}
 		void run(
-			() => till.recordTender({ saleId: current.id, method: 'cash', amountMinor, currency: 'BDT' }),
+			() => till.recordTender({ saleId: current.id, method: 'cash', amountMinor }),
 			(result) => {
 				sale = result;
 				cashInput = '';
@@ -403,8 +394,7 @@
 				till.recordTender({
 					saleId: current.id,
 					method: 'cash',
-					amountMinor: current.balanceDueMinor,
-					currency: 'BDT'
+					amountMinor: current.balanceDueMinor
 				}),
 			(result) => (sale = result)
 		);

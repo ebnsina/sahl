@@ -11,21 +11,13 @@
 	 * by a separate command that never sends the expected figure at all. Hiding it in CSS or behind
 	 * a conditional would leave it one devtools panel away.
 	 */
-	import {
-		Badge,
-		Button,
-		Card,
-		Field,
-		Input,
-		Numeric,
-		Select,
-		createFormatters,
-		parseMinor
-	} from '@sahl/ui';
+	import { Badge, Button, Card, Field, Input, Numeric, Select, parseMinor } from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
+	import { loadShop, shop } from '$lib/outlet.svelte';
 	import { asTillError, isTillAvailable, till, type CashReason, type ShiftView } from '$lib/till';
 
-	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
+	// The outlet's own currency and timezone, not this screen's guess.
+	const format = $derived(shop.formatters);
 
 	const REASONS: Array<{ value: CashReason; label: string; sign: -1 | 1 }> = [
 		{ value: 'float_top_up', label: 'Add to float', sign: 1 },
@@ -79,6 +71,7 @@
 	$effect(() => {
 		available = isTillAvailable();
 		if (available) {
+			void loadShop();
 			void run(
 				() => till.shiftReport(),
 				(result) => (shift = result)
@@ -87,7 +80,7 @@
 	});
 
 	function amount(entry: string, field: string): number | null {
-		const minor = parseMinor(entry, 'BDT');
+		const minor = parseMinor(entry, shop.currency ?? 'BDT');
 		if (minor === null) {
 			error = { code: 'bad_amount', message: `Enter ${field} like 500 or 499.50` };
 			return null;

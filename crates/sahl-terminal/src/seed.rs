@@ -254,14 +254,30 @@ fn trade(till: &mut Terminal, market: Market, clock: &mut Clock) -> Result<(), T
         let voids_often = cashier == 2;
         if lines.len() > 1 && rng.below(if voids_often { 3 } else { 12 }) == 0 {
             let victim = lines.remove(0);
+
+            // Who could actually have approved this, asked the same way the till asks. Recording
+            // the cashier regardless would write events the command layer would have refused, and
+            // the anomaly feed would then report a bypass that cannot happen in the real app.
+            let value = till
+                .sale(sale)?
+                .lines()
+                .iter()
+                .find(|line| line.id == victim)
+                .map_or(Money::from_minor(0, currency), |line| {
+                    line.line_value().unwrap_or(Money::from_minor(0, currency))
+                });
+            let authorized_by = approver_for(
+                cashier,
+                |role, policy| sahl_core::staff::authorize_void(role, value, policy),
+                market,
+            );
+
             till.record(
                 &SaleEvent::LineVoided {
                     sale_id: sale,
                     line_id: victim,
                     reason: VoidReason::CustomerChanged,
-                    // Inside the void limit, so the cashier is their own approver — which is what
-                    // the threshold is for and what the feed must not mistake for a bypass.
-                    authorized_by: staff_id(cashier),
+                    authorized_by,
                 },
                 Uuid::now_v7(),
                 clock.tick(),
@@ -272,15 +288,20 @@ fn trade(till: &mut Terminal, market: Market, clock: &mut Clock) -> Result<(), T
             continue;
         }
 
-        // Every eleventh ticket gets a small discount, inside what a cashier may give.
+        // Every eleventh ticket gets a small discount.
         if ticket % 11 == 0 {
+            let amount = Money::from_minor(200, currency);
+            let authorized_by = approver_for(
+                cashier,
+                |role, policy| sahl_core::staff::authorize_discount(role, amount, policy),
+                market,
+            );
+
             till.record(
                 &SaleEvent::OrderDiscounted {
                     sale_id: sale,
-                    discount: Discount::Amount {
-                        amount: Money::from_minor(200, currency),
-                    },
-                    authorized_by: staff_id(cashier),
+                    discount: Discount::Amount { amount },
+                    authorized_by,
                 },
                 Uuid::now_v7(),
                 clock.tick(),
@@ -323,6 +344,28 @@ fn trade(till: &mut Terminal, market: Market, clock: &mut Clock) -> Result<(), T
     }
 
     Ok(())
+}
+
+/// Who the till would have recorded as approving this.
+///
+/// The seed writes events straight to the log rather than through the command layer, so it has to
+/// reach the same answer that layer would — otherwise the demo contains actions the real app would
+/// have refused, and the anomaly feed reports a control being bypassed that cannot be bypassed.
+fn approver_for(
+    cashier: usize,
+    verdict: impl Fn(Role, &ApprovalPolicy) -> sahl_core::staff::Authorization,
+    market: Market,
+) -> Uuid {
+    let policy = settings(market)
+        .approval
+        .unwrap_or_else(|| ApprovalPolicy::strictest(settings(market).currency));
+
+    if verdict(Role::Cashier, &policy).is_allowed() {
+        staff_id(cashier)
+    } else {
+        // The manager, who holds the permission outright.
+        staff_id(1)
+    }
 }
 
 /// A tiny linear congruential generator.

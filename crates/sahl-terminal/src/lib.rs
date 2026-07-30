@@ -78,8 +78,26 @@ pub fn run() {
             let store = EventStore::open(&data_dir.join("till.db"), identity.device_id)
                 .map_err(|error| format!("cannot open the local event log: {error}"))?;
 
-            let terminal = Terminal::load(store, identity)
+            let mut terminal = Terminal::load(store, identity)
                 .map_err(|error| format!("the local event log is unusable: {error}"))?;
+
+            // A demo shop from the command line, so the two markets can be looked at without
+            // clicking through setup. Debug builds only, and only on a till nobody has used —
+            // the same rule the button obeys, for the same reason.
+            #[cfg(debug_assertions)]
+            if let Ok(market) = std::env::var("SAHL_SEED") {
+                // An unrecognised market is a hard failure, not a shrug. Silently opening an
+                // unseeded till would look exactly like a seed that ran and did nothing.
+                let market = seed::Market::from_label(&market)
+                    .map_err(|_| format!("SAHL_SEED must be bangladesh or gulf, got {market:?}"))?;
+
+                if terminal.staff().is_empty() {
+                    terminal
+                        .seed_now(market)
+                        .map_err(|error| format!("could not seed the demo shop: {error}"))?;
+                    eprintln!("seeded a demo shop — every PIN is {}", seed::DEMO_PIN);
+                }
+            }
 
             let shared = std::sync::Arc::new(std::sync::Mutex::new(terminal));
 

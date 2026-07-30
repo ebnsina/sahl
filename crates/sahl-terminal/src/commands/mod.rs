@@ -101,6 +101,7 @@ impl From<TerminalError> for CommandError {
             TerminalError::Scale(_) => "bad_scan",
             TerminalError::Weigh(_) => "rejected",
             TerminalError::Denied => "denied",
+            TerminalError::NotConfigured => "not_configured",
             TerminalError::NotInvoiced { .. } => "not_invoiced",
             TerminalError::Directory(_) | TerminalError::Purchase(_) | TerminalError::Fiscal(_) => {
                 "rejected"
@@ -151,6 +152,38 @@ fn authorize(
         message: "the till is in an inconsistent state and must be restarted".to_owned(),
     })?;
     Ok(terminal.approve(permission, pin)?)
+}
+
+/// What this outlet trades in.
+///
+/// # Errors
+/// `not_configured` when setup has not been done. Refused rather than defaulted: a sale in a
+/// currency nobody chose is a number with no meaning, and every total built on it inherits that.
+fn outlet_currency(state: &TerminalState) -> Result<Currency, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    terminal
+        .outlet()
+        .map(|outlet| outlet.currency)
+        .ok_or(CommandError {
+            code: "not_configured",
+            message: "set the outlet up before selling — it decides the currency".to_owned(),
+        })
+}
+
+/// The currency a sale is already in.
+///
+/// Everything added to a sale inherits it. The screen cannot choose, so it cannot choose wrong.
+fn sale_currency(state: &TerminalState, sale_id: Uuid) -> Result<Currency, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal.sale(sale_id)?.currency())
 }
 
 /// The person at the till, or a refusal.
@@ -236,13 +269,16 @@ pub fn open_sale(state: tauri::State<'_, TerminalState>) -> CommandResult {
     // nothing, and every per-cashier figure — and every question the anomaly feed asks — would be
     // about whichever constant was compiled in.
     let cashier_id = signed_in(&state)?;
+    // The outlet's currency, never a constant. A till configured in riyals was opening every sale
+    // in taka, and the first line added failed on a currency mismatch — the shop could not sell.
+    let currency = outlet_currency(&state)?;
 
     apply(
         &state,
         &SaleEvent::Opened {
             sale_id: new_id(),
             opened_by: cashier_id,
-            currency: Currency::Bdt,
+            currency,
             pricing_mode: PricingMode::TaxInclusive,
             rounding: Rounding::HalfUp,
         },
@@ -267,13 +303,8 @@ pub fn add_line(
     tax_treatment: String,
     // Option ids chosen at the till. Validated against the product's groups by the terminal.
     chosen_options: Vec<Uuid>,
-    currency: String,
 ) -> CommandResult {
-    let currency = Currency::from_code(&currency).map_err(|error| CommandError {
-        code: "bad_currency",
-        message: error.to_string(),
-    })?;
-
+    let currency = sale_currency(&state, sale_id)?;
     let unit_price = Money::from_minor(unit_price_minor, currency);
     let quantity = Quantity::from_milli(quantity_milli);
     let tax_class = tax_class(&tax_treatment, tax_basis_points)?;
@@ -412,13 +443,9 @@ pub fn discount_order(
     sale_id: Uuid,
     amount_minor: Option<i64>,
     basis_points: Option<i32>,
-    currency: String,
     pin: String,
 ) -> CommandResult {
-    let currency = Currency::from_code(&currency).map_err(|error| CommandError {
-        code: "bad_currency",
-        message: error.to_string(),
-    })?;
+    let currency = sale_currency(&state, sale_id)?;
 
     let discount = match (amount_minor, basis_points) {
         (Some(minor), None) => Discount::Amount {
@@ -473,13 +500,9 @@ pub fn record_tender(
     sale_id: Uuid,
     method: String,
     amount_minor: i64,
-    currency: String,
     reference: Option<String>,
 ) -> CommandResult {
-    let currency = Currency::from_code(&currency).map_err(|error| CommandError {
-        code: "bad_currency",
-        message: error.to_string(),
-    })?;
+    let currency = sale_currency(&state, sale_id)?;
 
     let method = match method.as_str() {
         "cash" => TenderMethod::Cash,
@@ -659,8 +682,8 @@ pub fn till_status(state: tauri::State<'_, TerminalState>) -> Result<TillStatus,
     })?;
 
     Ok(TillStatus {
-        takings_minor: terminal.takings(Currency::Bdt)?.minor(),
-        currency: Currency::Bdt.code(),
+        takings_minor: terminal.takings(terminal.currency()?)?.minor(),
+        currency: terminal.currency()?.code(),
         unsynced_count: terminal.unsynced_count()?,
         open_sales: terminal.book().open().count(),
     })
@@ -682,7 +705,8 @@ where
     })?;
 
     act(&mut terminal)?;
-    Ok(ShiftView::of(&terminal.shift_report()?, Currency::Bdt))
+    let currency = terminal.currency()?;
+    Ok(ShiftView::of(&terminal.shift_report()?, currency))
 }
 
 /// Take the till, counting in the starting float.
@@ -691,13 +715,14 @@ pub fn open_shift(state: tauri::State<'_, TerminalState>, opening_float_minor: i
     let cashier_id = signed_in(&state)?;
 
     with_shift(&state, |terminal| {
+        let currency = terminal.currency()?;
         terminal
             .record_shift(
                 &ShiftEvent::Opened {
                     shift_id: new_id(),
-                    currency: Currency::Bdt,
+                    currency,
                     opened_by: cashier_id,
-                    opening_float: Money::from_minor(opening_float_minor, Currency::Bdt),
+                    opening_float: Money::from_minor(opening_float_minor, currency),
                     at: now(),
                 },
                 new_id(),
@@ -724,12 +749,13 @@ pub fn move_cash(
     let authorized_by = authorize(&state, Permission::MoveCash, &pin)?;
     with_shift(&state, |terminal| {
         let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
+        let currency = terminal.currency()?;
         terminal
             .record_shift(
                 &ShiftEvent::CashMoved {
                     shift_id,
                     movement_id: new_id(),
-                    amount: Money::from_minor(amount_minor, Currency::Bdt),
+                    amount: Money::from_minor(amount_minor, currency),
                     reason,
                     note,
                     authorized_by,
@@ -749,11 +775,12 @@ pub fn count_drawer(state: tauri::State<'_, TerminalState>, counted_minor: i64) 
 
     with_shift(&state, |terminal| {
         let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
+        let currency = terminal.currency()?;
         terminal
             .record_shift(
                 &ShiftEvent::Counted {
                     shift_id,
-                    counted: Money::from_minor(counted_minor, Currency::Bdt),
+                    counted: Money::from_minor(counted_minor, currency),
                     counted_by,
                     at: now(),
                 },
@@ -786,12 +813,13 @@ pub fn close_shift(state: tauri::State<'_, TerminalState>, closing_cash_minor: i
 
     with_shift(&state, |terminal| {
         let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
+        let currency = terminal.currency()?;
         terminal
             .record_shift(
                 &ShiftEvent::Closed {
                     shift_id,
                     closed_by,
-                    closing_cash: Money::from_minor(closing_cash_minor, Currency::Bdt),
+                    closing_cash: Money::from_minor(closing_cash_minor, currency),
                     at: now(),
                 },
                 new_id(),
@@ -853,7 +881,7 @@ where
     })?;
 
     act(&mut terminal)?;
-    Ok(StockView::of(terminal.stock(), Currency::Bdt))
+    Ok(StockView::of(terminal.stock(), terminal.currency()?))
 }
 
 /// Book a delivery in as a new batch.
@@ -873,6 +901,7 @@ pub fn receive_stock(
     let received_by = signed_in(&state)?;
 
     with_stock(&state, |terminal| {
+        let currency = terminal.currency()?;
         terminal
             .record_stock(
                 &InventoryEvent::BatchReceived {
@@ -881,7 +910,7 @@ pub fn receive_stock(
                     lot,
                     expires_at: expires_at_millis.map(Timestamp::from_millis),
                     quantity: Quantity::from_milli(quantity_milli),
-                    unit_cost: Money::from_minor(unit_cost_minor, Currency::Bdt),
+                    unit_cost: Money::from_minor(unit_cost_minor, currency),
                     supplier,
                     at: now(),
                     received_by,
@@ -1291,7 +1320,7 @@ fn order_views(terminal: &Terminal) -> OrderResult {
         .orders()
         .into_iter()
         .map(|order| {
-            OrderView::of(order, Currency::Bdt).map_err(|error| CommandError {
+            OrderView::of(order, terminal.currency()?).map_err(|error| CommandError {
                 code: "rejected",
                 message: error.to_string(),
             })
@@ -1339,13 +1368,14 @@ pub fn place_order(
         });
     }
 
+    let currency = outlet_currency(&state)?;
     let lines: Vec<OrderLine> = lines
         .into_iter()
         .map(|line| OrderLine {
             line_id: new_id(),
             product_id: line.product_id,
             quantity: Quantity::from_milli(line.quantity_milli),
-            unit_cost: Money::from_minor(line.unit_cost_minor, Currency::Bdt),
+            unit_cost: Money::from_minor(line.unit_cost_minor, currency),
         })
         .collect();
 
@@ -1398,7 +1428,7 @@ pub fn receive_against_order(
 
         let supplier = terminal.order(order_id)?.supplier.clone();
         let batch_id = new_id();
-        let unit_cost = Money::from_minor(unit_cost_minor, Currency::Bdt);
+        let unit_cost = Money::from_minor(unit_cost_minor, terminal.currency()?);
         let quantity = Quantity::from_milli(quantity_milli);
 
         terminal.record_receipt(
@@ -2175,12 +2205,13 @@ pub fn save_product(
         code: "bad_unit",
         message: format!("{unit} is not a unit of supply"),
     })?;
+    let currency = outlet_currency(&state)?;
 
     let details = ProductDetails {
         name: name.trim().to_owned(),
         sku: sku.and_then(non_empty),
         barcodes: barcodes.into_iter().filter_map(non_empty).collect(),
-        price: Money::from_minor(price_minor, Currency::Bdt),
+        price: Money::from_minor(price_minor, currency),
         unit,
         tax_class: tax_class(&tax_treatment, tax_basis_points)?,
         category: category.and_then(non_empty),
@@ -2212,7 +2243,7 @@ pub fn save_product(
                     .map(|option| sahl_core::catalogue::ModifierOption {
                         id: option.id.unwrap_or_else(new_id),
                         name: option.name.trim().to_owned(),
-                        price_delta: Money::from_minor(option.price_delta_minor, Currency::Bdt),
+                        price_delta: Money::from_minor(option.price_delta_minor, currency),
                     })
                     .collect(),
             })
