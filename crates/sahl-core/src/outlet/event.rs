@@ -10,6 +10,7 @@ use crate::time::Timestamp;
 use super::config::{FiscalRegime, OutletConfig, OutletError};
 use super::profile::Profile;
 use crate::scale::ScaleFormat;
+use crate::staff::ApprovalPolicy;
 
 /// The settings an outlet is configured with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +26,10 @@ pub struct OutletSettings {
     /// everywhere else — a shop with no scale must not be asked to describe one.
     #[serde(default)]
     pub scale: Option<ScaleFormat>,
+    /// Absent on an event written before thresholds existed, which reads as the strictest setting
+    /// — the safe direction for a default to fall.
+    #[serde(default)]
+    pub approval: Option<ApprovalPolicy>,
 }
 
 /// Everything that happens to an outlet's configuration.
@@ -83,6 +88,9 @@ impl OutletEvent {
                     tax_registration: settings.tax_registration.clone(),
                     address: settings.address.clone(),
                     scale: settings.scale.clone(),
+                    approval: settings
+                        .approval
+                        .unwrap_or_else(|| ApprovalPolicy::strictest(settings.currency)),
                     configured_at: *at,
                 };
                 config.validate()?;
@@ -114,6 +122,7 @@ mod tests {
             tax_registration: Some("0031234567890".to_owned()),
             address: "12 Dhanmondi 27, Dhaka".to_owned(),
             scale: None,
+            approval: None,
         }
     }
 

@@ -11,7 +11,18 @@
 	 * back to support, so it carries the device identity and the fiscal position too.
 	 */
 	import Building2 from '@lucide/svelte/icons/building-2';
-	import { Badge, Button, Card, Field, Input, Logo, Select, createFormatters } from '@sahl/ui';
+	import {
+		Badge,
+		Button,
+		Card,
+		Field,
+		Input,
+		Logo,
+		Select,
+		createFormatters,
+		minorToDecimalString,
+		parseMinor
+	} from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
 	import { asTillError, isTillAvailable, till, type OutletView } from '$lib/till';
 
@@ -71,6 +82,10 @@
 	let scaleValueDigits = $state('5');
 	let scaleValueDecimals = $state('3');
 	let scaleFillerDigits = $state('0');
+	/** What a cashier may do unaided. Empty means zero, which means nothing. */
+	let discountLimit = $state('');
+	let discountRatePercent = $state('');
+	let voidLimit = $state('');
 
 	let pendingSave = $state(false);
 	let approvalError = $state<string | null>(null);
@@ -101,6 +116,15 @@
 		regime = result.regime;
 		taxRegistration = result.taxRegistration ?? '';
 		address = result.address;
+		discountLimit = result.approval.discountLimitMinor
+			? minorToDecimalString(result.approval.discountLimitMinor, 2)
+			: '';
+		discountRatePercent = result.approval.discountRateBasisPoints
+			? String(result.approval.discountRateBasisPoints / 100)
+			: '';
+		voidLimit = result.approval.voidLimitMinor
+			? minorToDecimalString(result.approval.voidLimitMinor, 2)
+			: '';
 		scaleOn = result.scale !== null;
 		if (result.scale) {
 			scalePrefix = result.scale.prefix;
@@ -282,6 +306,58 @@
 						<p class="text-secondary text-text-muted -mt-2">
 							{PROFILES.find((entry) => entry.value === profile)?.note}
 						</p>
+
+						<div class="border-border flex flex-col gap-3 border-t pt-4">
+							<div>
+								<p class="label-caps">What a cashier may do alone</p>
+								<p class="text-secondary text-text-muted mt-1">
+									Leave these empty and everything needs a manager's PIN, which is what an
+									unconfigured till does. Anything a cashier does on their own authority is still
+									recorded under their name.
+								</p>
+							</div>
+
+							<div class="grid grid-cols-2 gap-3">
+								<Field id="limit-discount" label="Discount up to" hint="Per sale.">
+									{#snippet children({ id, describedBy })}
+										<Input
+											{id}
+											{describedBy}
+											bind:value={discountLimit}
+											numeric
+											forceLtr
+											placeholder="0.00"
+										/>
+									{/snippet}
+								</Field>
+
+								<Field id="limit-rate" label="Or a percentage up to" hint="%">
+									{#snippet children({ id, describedBy })}
+										<Input
+											{id}
+											{describedBy}
+											bind:value={discountRatePercent}
+											numeric
+											forceLtr
+											placeholder="0"
+										/>
+									{/snippet}
+								</Field>
+
+								<Field id="limit-void" label="Void a line worth up to">
+									{#snippet children({ id, describedBy })}
+										<Input
+											{id}
+											{describedBy}
+											bind:value={voidLimit}
+											numeric
+											forceLtr
+											placeholder="0.00"
+										/>
+									{/snippet}
+								</Field>
+							</div>
+						</div>
 
 						<div class="border-border flex flex-col gap-3 border-t pt-4">
 							<label class="flex items-start gap-2">

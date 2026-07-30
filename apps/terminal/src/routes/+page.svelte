@@ -28,6 +28,7 @@
 		parseMinor
 	} from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
+	import SignIn from '$lib/SignIn.svelte';
 	import {
 		asTillError,
 		isTillAvailable,
@@ -41,13 +42,12 @@
 		type ProductView,
 		type KitchenTicketView,
 		type SplitPartView,
+		type StaffView,
 		type TillStatus
 	} from '$lib/till';
 
 	/** The real catalogue, from the till. Empty until someone adds a product. */
 	let catalogue = $state<ProductView[]>([]);
-
-	const CASHIER = '00000000-0000-0000-0000-0000000000ca';
 
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
@@ -57,6 +57,8 @@
 	/** Why a challan could not be issued. Surfaced, never allowed to block the sale. */
 	let documentProblem = $state<string | null>(null);
 	let hasPrinter = $state(false);
+	/** Who is at the till. Re-asked rather than cached — the session expires by being read. */
+	let who = $state<StaffView | null>(null);
 	/** Open tickets, so one a cashier navigated away from is reachable again. */
 	let tickets = $state<TicketView[]>([]);
 	let showTickets = $state(false);
@@ -100,6 +102,12 @@
 		} catch (thrown) {
 			error = asTillError(thrown);
 			if (error.code === 'no_till') available = false;
+			// The session went idle mid-transaction. Back to the sign-in rather than leaving a
+			// screen that looks live and refuses everything.
+			if (error.code === 'not_signed_in') {
+				who = null;
+				sale = null;
+			}
 		} finally {
 			busy = false;
 		}
@@ -108,6 +116,8 @@
 	$effect(() => {
 		available = isTillAvailable();
 		if (available) {
+			// Asked, never assumed: a till that was asleep reports nobody the moment it is read.
+			void till.currentSession().then((member) => (who = member));
 			void run(
 				() => till.status(),
 				(result) => (status = result)
@@ -142,8 +152,7 @@
 				till.fireKitchen({
 					saleId: current.id,
 					printedAt: format.dateTime(Date.now()),
-					paper: 'mm80',
-					firedBy: CASHIER
+					paper: 'mm80'
 				}),
 			(result) => {
 				fireOutcome = { printed: result.printed, reason: result.reason };
@@ -177,7 +186,7 @@
 
 	function discardEmpty() {
 		void run(
-			() => till.discardEmptyTickets(CASHIER),
+			() => till.discardEmptyTickets(),
 			() => void refreshTickets()
 		);
 	}
@@ -190,7 +199,7 @@
 		fireOutcome = null;
 		pendingTickets = [];
 		void run(
-			() => till.openSale(CASHIER),
+			() => till.openSale(),
 			(result) => {
 				sale = result;
 				cashInput = '';
@@ -298,6 +307,14 @@
 		);
 	}
 
+	function signOut() {
+		void (async () => {
+			await till.signOut();
+			who = null;
+			sale = null;
+		})();
+	}
+
 	function voidLine(lineId: string) {
 		// The approval is not this screen's to grant. It asks, the till decides.
 		approvalError = null;
@@ -397,7 +414,7 @@
 		const current = sale;
 		if (!current) return;
 		void run(
-			() => till.completeSale(current.id, CASHIER),
+			() => till.completeSale(current.id),
 			(result) => {
 				sale = result;
 				// Fetched after the sale is already settled, and its failure never undoes it. A till
@@ -439,7 +456,7 @@
 		const current = sale;
 		if (!current) return;
 		void run(
-			() => till.abandonSale(current.id, CASHIER),
+			() => till.abandonSale(current.id),
 			() => (sale = null)
 		);
 	}
@@ -505,6 +522,16 @@
 			<a href="/settings" class="text-secondary text-text-secondary hover:text-text underline">
 				Settings
 			</a>
+			{#if who}
+				<span class="text-secondary text-text-secondary">{who.name}</span>
+				<button
+					type="button"
+					class="text-secondary text-text-secondary hover:text-text underline"
+					onclick={signOut}
+				>
+					Sign out
+				</button>
+			{/if}
 		</div>
 	</header>
 
@@ -524,6 +551,10 @@
 				</div>
 			</Card>
 		</div>
+	{:else if !who}
+		<!-- Nothing rings until the till knows whose sale it is. Every per-cashier figure and every
+		     question the anomaly feed asks is built on that id. -->
+		<SignIn onsignedin={(member) => (who = member)} />
 	{:else}
 		<div class="grid flex-1 grid-cols-1 gap-4 overflow-hidden p-4 lg:grid-cols-[1fr_26rem]">
 			<Card label="Items" class="flex min-h-0 flex-col">

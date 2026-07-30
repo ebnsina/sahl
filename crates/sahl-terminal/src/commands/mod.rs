@@ -27,7 +27,7 @@ use sahl_core::quantity::Quantity;
 use sahl_core::sale::{SaleEvent, TenderMethod, VoidReason, Wallet};
 use sahl_core::scale::{Embedded, ScaleFormat};
 use sahl_core::shift::{CashMovementReason, ShiftEvent};
-use sahl_core::staff::{Permission, Role, StaffEvent, pin as staff_pin};
+use sahl_core::staff::{Authorization, Permission, Role, StaffEvent, pin as staff_pin};
 use sahl_core::tax::{Discount, PricingMode, TaxClass};
 use sahl_escpos::{
     Document as EscposDocument, KitchenTicketData as EscposKitchenTicket,
@@ -100,6 +100,7 @@ impl From<TerminalError> for CommandError {
             // from anything else the till refuses.
             TerminalError::Scale(_) => "bad_scan",
             TerminalError::Weigh(_) => "rejected",
+            TerminalError::Denied => "denied",
             TerminalError::NotInvoiced { .. } => "not_invoiced",
             TerminalError::Directory(_) | TerminalError::Purchase(_) | TerminalError::Fiscal(_) => {
                 "rejected"
@@ -152,6 +153,69 @@ fn authorize(
     Ok(terminal.approve(permission, pin)?)
 }
 
+/// The person at the till, or a refusal.
+///
+/// # Errors
+/// `not_signed_in` when nobody is, which includes a session that went idle. Deliberately not a
+/// fallback to anybody: an action attributed to a person who was not there is worse than a
+/// refusal, and every per-cashier figure is built on these ids.
+fn signed_in(state: &TerminalState) -> Result<Uuid, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    terminal
+        .current_session(now())
+        .map(|session| session.staff_id)
+        .ok_or(CommandError {
+            code: "not_signed_in",
+            message: "sign in to do that".to_owned(),
+        })
+}
+
+/// What a line is worth, for judging whether voiding it needs approval.
+fn line_value(
+    state: &TerminalState,
+    sale_id: Uuid,
+    line_id: Uuid,
+) -> Result<sahl_core::Money, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let sale = terminal.sale(sale_id)?;
+    let line = sale
+        .lines()
+        .iter()
+        .find(|line| line.id == line_id)
+        .ok_or(CommandError {
+            code: "unknown_line",
+            message: format!("no line {line_id} on this sale"),
+        })?;
+
+    line.line_value().map_err(|error| CommandError {
+        code: "rejected",
+        message: error.to_string(),
+    })
+}
+
+/// Ask the till who authorises this. The decision itself lives in `Terminal::authorize_for`.
+fn authorize_at_limit(
+    state: &TerminalState,
+    permission: Permission,
+    verdict: impl Fn(Role, &sahl_core::staff::ApprovalPolicy) -> Authorization,
+    pin: &str,
+) -> Result<Uuid, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal.authorize_for(permission, verdict, pin, now())?)
+}
+
 fn apply(state: &TerminalState, event: &SaleEvent) -> CommandResult {
     let mut terminal = state.inner.lock().map_err(|_| CommandError {
         code: "poisoned",
@@ -167,7 +231,12 @@ fn apply(state: &TerminalState, event: &SaleEvent) -> CommandResult {
 }
 
 #[tauri::command]
-pub fn open_sale(state: tauri::State<'_, TerminalState>, cashier_id: Uuid) -> CommandResult {
+pub fn open_sale(state: tauri::State<'_, TerminalState>) -> CommandResult {
+    // Whoever is signed in, never an id the screen chose. An `opened_by` the UI supplies records
+    // nothing, and every per-cashier figure — and every question the anomaly feed asks — would be
+    // about whichever constant was compiled in.
+    let cashier_id = signed_in(&state)?;
+
     apply(
         &state,
         &SaleEvent::Opened {
@@ -318,7 +387,14 @@ pub fn void_line(
         }
     };
 
-    let authorized_by = authorize(&state, Permission::VoidLine, &pin)?;
+    // The line's own value decides whether anyone else is needed, so it is read before asking.
+    let value = line_value(&state, sale_id, line_id)?;
+    let authorized_by = authorize_at_limit(
+        &state,
+        Permission::VoidLine,
+        |role, policy| sahl_core::staff::authorize_void(role, value, policy),
+        &pin,
+    )?;
     apply(
         &state,
         &SaleEvent::LineVoided {
@@ -359,7 +435,28 @@ pub fn discount_order(
         }
     };
 
-    let authorized_by = authorize(&state, Permission::ApplyDiscount, &pin)?;
+    let authorized_by = match discount {
+        // A percentage is judged before it meets a basket — "20% off" is the same decision
+        // whether the ticket is small or large.
+        Discount::Percentage { rate } => authorize_at_limit(
+            &state,
+            Permission::ApplyDiscount,
+            |role, policy| sahl_core::staff::authorize_discount_rate(role, rate, policy),
+            &pin,
+        )?,
+        Discount::Amount { amount } => authorize_at_limit(
+            &state,
+            Permission::ApplyDiscount,
+            |role, policy| sahl_core::staff::authorize_discount(role, amount, policy),
+            &pin,
+        )?,
+        Discount::None => {
+            return Err(CommandError {
+                code: "bad_discount",
+                message: "give exactly one of amount or percentage".to_owned(),
+            });
+        }
+    };
     apply(
         &state,
         &SaleEvent::OrderDiscounted {
@@ -429,11 +526,9 @@ pub fn record_tender(
 /// The total and change are taken from the till's own calculation, never from the UI. The webview
 /// could not supply them correctly even if it wanted to, which is the point.
 #[tauri::command]
-pub fn complete_sale(
-    state: tauri::State<'_, TerminalState>,
-    sale_id: Uuid,
-    cashier_id: Uuid,
-) -> CommandResult {
+pub fn complete_sale(state: tauri::State<'_, TerminalState>, sale_id: Uuid) -> CommandResult {
+    let cashier_id = signed_in(&state)?;
+
     let (total, change) = {
         let terminal = state.inner.lock().map_err(|_| CommandError {
             code: "poisoned",
@@ -482,11 +577,9 @@ pub fn complete_sale(
 }
 
 #[tauri::command]
-pub fn abandon_sale(
-    state: tauri::State<'_, TerminalState>,
-    sale_id: Uuid,
-    abandoned_by: Uuid,
-) -> CommandResult {
+pub fn abandon_sale(state: tauri::State<'_, TerminalState>, sale_id: Uuid) -> CommandResult {
+    let abandoned_by = signed_in(&state)?;
+
     apply(
         &state,
         &SaleEvent::Abandoned {
@@ -594,11 +687,9 @@ where
 
 /// Take the till, counting in the starting float.
 #[tauri::command]
-pub fn open_shift(
-    state: tauri::State<'_, TerminalState>,
-    cashier_id: Uuid,
-    opening_float_minor: i64,
-) -> ShiftResult {
+pub fn open_shift(state: tauri::State<'_, TerminalState>, opening_float_minor: i64) -> ShiftResult {
+    let cashier_id = signed_in(&state)?;
+
     with_shift(&state, |terminal| {
         terminal
             .record_shift(
@@ -653,11 +744,9 @@ pub fn move_cash(
 
 /// Record a physical count of the drawer.
 #[tauri::command]
-pub fn count_drawer(
-    state: tauri::State<'_, TerminalState>,
-    counted_minor: i64,
-    counted_by: Uuid,
-) -> ShiftResult {
+pub fn count_drawer(state: tauri::State<'_, TerminalState>, counted_minor: i64) -> ShiftResult {
+    let counted_by = signed_in(&state)?;
+
     with_shift(&state, |terminal| {
         let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
         terminal
@@ -692,11 +781,9 @@ pub fn blind_count_sheet(state: tauri::State<'_, TerminalState>) -> ShiftResult 
 
 /// Close the till. Nothing may be added to the shift afterwards.
 #[tauri::command]
-pub fn close_shift(
-    state: tauri::State<'_, TerminalState>,
-    closed_by: Uuid,
-    closing_cash_minor: i64,
-) -> ShiftResult {
+pub fn close_shift(state: tauri::State<'_, TerminalState>, closing_cash_minor: i64) -> ShiftResult {
+    let closed_by = signed_in(&state)?;
+
     with_shift(&state, |terminal| {
         let shift_id = terminal.shift().ok_or(TerminalError::NoOpenShift)?.id();
         terminal
@@ -774,11 +861,6 @@ where
 /// Receiving creates a batch rather than adding to one: a second delivery of the same product is a
 /// different lot with its own expiry, and merging them is what makes a recall under-report.
 #[tauri::command]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a delivery line carries this many independent facts; a struct would only move the \
-              argument list to the TypeScript side"
-)]
 pub fn receive_stock(
     state: tauri::State<'_, TerminalState>,
     product_id: Uuid,
@@ -787,8 +869,9 @@ pub fn receive_stock(
     quantity_milli: i64,
     unit_cost_minor: i64,
     supplier: Option<String>,
-    received_by: Uuid,
 ) -> StockResult {
+    let received_by = signed_in(&state)?;
+
     with_stock(&state, |terminal| {
         terminal
             .record_stock(
@@ -820,8 +903,9 @@ pub fn count_stock(
     state: tauri::State<'_, TerminalState>,
     batch_id: Uuid,
     counted_milli: i64,
-    counted_by: Uuid,
 ) -> StockResult {
+    let counted_by = signed_in(&state)?;
+
     with_stock(&state, |terminal| {
         terminal
             .record_stock(
@@ -845,8 +929,9 @@ pub fn issue_stock(
     batch_id: Uuid,
     quantity_milli: i64,
     reason: String,
-    issued_by: Uuid,
 ) -> StockResult {
+    let issued_by = signed_in(&state)?;
+
     let reason = issue_reason(&reason)?;
     with_stock(&state, |terminal| {
         terminal
@@ -922,20 +1007,50 @@ pub fn sign_in(
     staff_id: Uuid,
     pin: String,
 ) -> Result<StaffView, CommandError> {
-    let terminal = state.inner.lock().map_err(|_| CommandError {
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
         code: "poisoned",
         message: "the till is in an inconsistent state and must be restarted".to_owned(),
     })?;
 
-    let id = terminal.sign_in(staff_id, &pin)?;
+    let session = terminal.sign_in(staff_id, &pin, now())?;
     terminal
         .staff()
-        .get(id)
+        .get(session.staff_id)
         .map(StaffView::of)
         .ok_or(CommandError {
             code: "not_authorized",
             message: "that PIN was not accepted".to_owned(),
         })
+}
+
+/// Who is at the till, or nobody.
+///
+/// The screen asks rather than holding its own copy: a session expires by being read, so a cached
+/// one would keep selling as somebody who walked away an hour ago.
+#[tauri::command]
+pub fn current_session(
+    state: tauri::State<'_, TerminalState>,
+) -> Result<Option<StaffView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal
+        .current_session(now())
+        .and_then(|session| terminal.staff().get(session.staff_id))
+        .map(StaffView::of))
+}
+
+#[tauri::command]
+pub fn sign_out(state: tauri::State<'_, TerminalState>) -> Result<(), CommandError> {
+    let mut terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    terminal.sign_out();
+    Ok(())
 }
 
 /// Enrol a staff member.
@@ -1159,8 +1274,9 @@ pub fn place_order(
     reference: Option<String>,
     expected_at_millis: Option<i64>,
     lines: Vec<OrderLineInput>,
-    placed_by: Uuid,
 ) -> OrderResult {
+    let placed_by = signed_in(&state)?;
+
     if supplier.trim().is_empty() {
         return Err(CommandError {
             code: "bad_supplier",
@@ -1206,11 +1322,6 @@ pub fn place_order(
 /// records the batch on the shelf. Recording only one of them is how a delivery ends up either
 /// invisible to a recall or invisible to the supplier reconciliation.
 #[tauri::command]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "a receipt against an order carries this many independent facts; a struct would only \
-              move the argument list to the TypeScript side"
-)]
 pub fn receive_against_order(
     state: tauri::State<'_, TerminalState>,
     order_id: Uuid,
@@ -1219,8 +1330,9 @@ pub fn receive_against_order(
     unit_cost_minor: i64,
     lot: Option<String>,
     expires_at_millis: Option<i64>,
-    received_by: Uuid,
 ) -> OrderResult {
+    let received_by = signed_in(&state)?;
+
     with_orders(&state, |terminal| {
         let product_id = terminal
             .order(order_id)?
@@ -1266,8 +1378,9 @@ pub fn close_order(
     state: tauri::State<'_, TerminalState>,
     order_id: Uuid,
     reason: String,
-    closed_by: Uuid,
 ) -> OrderResult {
+    let closed_by = signed_in(&state)?;
+
     let reason = close_reason(&reason)?;
     with_orders(&state, |terminal| {
         terminal
@@ -1328,6 +1441,8 @@ pub struct OutletView {
     pub capabilities: Vec<&'static str>,
     /// Absent where no scale prints labels, which is every outlet but a grocery.
     pub scale: Option<ScaleFormatView>,
+    /// What a cashier may do unaided. All zeros means everything needs somebody else.
+    pub approval: ApprovalView,
 }
 
 /// A configured scale layout, as the settings screen redraws it.
@@ -1385,6 +1500,11 @@ pub fn outlet_config(
             .map(capability_label)
             .collect(),
         scale: outlet.scale.as_ref().map(ScaleFormatView::of),
+        approval: ApprovalView {
+            discount_limit_minor: outlet.approval.discount_limit.minor(),
+            discount_rate_basis_points: outlet.approval.discount_rate_limit.basis_points(),
+            void_limit_minor: outlet.approval.void_limit.minor(),
+        },
     }))
 }
 
@@ -1407,6 +1527,7 @@ pub fn configure_outlet(
     tax_registration: Option<String>,
     address: String,
     scale: Option<ScaleFormatInput>,
+    approval: Option<ApprovalInput>,
     pin: String,
 ) -> Result<Option<OutletView>, CommandError> {
     let profile = match profile.as_str() {
@@ -1476,6 +1597,12 @@ pub fn configure_outlet(
                     .map(ScaleFormatInput::into_format)
                     .transpose()
                     .map_err(TerminalError::from)?,
+                // Absent means the strictest setting: everything needs somebody else, which is
+                // what a shop nobody has configured should assume.
+                approval: Some(approval.map_or_else(
+                    || sahl_core::staff::ApprovalPolicy::strictest(currency),
+                    |input| input.into_policy(currency),
+                )),
             },
             at: now(),
             configured_by,
@@ -1860,6 +1987,34 @@ pub fn all_products(
         .into_iter()
         .map(ProductView::of)
         .collect())
+}
+
+/// The approval thresholds, as the settings screen sends them.
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalInput {
+    pub discount_limit_minor: i64,
+    pub discount_rate_basis_points: i32,
+    pub void_limit_minor: i64,
+}
+
+impl ApprovalInput {
+    fn into_policy(self, currency: Currency) -> sahl_core::staff::ApprovalPolicy {
+        sahl_core::staff::ApprovalPolicy {
+            discount_limit: Money::from_minor(self.discount_limit_minor, currency),
+            discount_rate_limit: Rate::from_basis_points(self.discount_rate_basis_points),
+            void_limit: Money::from_minor(self.void_limit_minor, currency),
+        }
+    }
+}
+
+/// What a cashier may do unaided, as the settings screen redraws it.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalView {
+    pub discount_limit_minor: i64,
+    pub discount_rate_basis_points: i32,
+    pub void_limit_minor: i64,
 }
 
 /// How a counter scale lays out its printed labels, as the settings screen sends it.
@@ -2269,8 +2424,9 @@ pub fn seat_sale(
     sale_id: Uuid,
     table_id: Uuid,
     covers: u32,
-    seated_by: Uuid,
 ) -> CommandResult {
+    let seated_by = signed_in(&state)?;
+
     {
         let terminal = state.inner.lock().map_err(|_| CommandError {
             code: "poisoned",
@@ -2387,8 +2543,9 @@ pub fn open_tickets(
 #[tauri::command]
 pub fn discard_empty_tickets(
     state: tauri::State<'_, TerminalState>,
-    abandoned_by: Uuid,
 ) -> Result<usize, CommandError> {
+    let abandoned_by = signed_in(&state)?;
+
     let empty: Vec<Uuid> = {
         let terminal = state.inner.lock().map_err(|_| CommandError {
             code: "poisoned",
@@ -2571,8 +2728,9 @@ pub fn fire_kitchen(
     sale_id: Uuid,
     printed_at: String,
     paper: String,
-    fired_by: Uuid,
 ) -> Result<FireOutcome, CommandError> {
+    let fired_by = signed_in(&state)?;
+
     let paper = match paper.as_str() {
         "mm58" => PaperWidth::Mm58,
         "mm80" => PaperWidth::Mm80,

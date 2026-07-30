@@ -9,6 +9,7 @@ pub mod directory;
 pub mod event;
 pub mod pin;
 pub mod role;
+pub mod session;
 
 pub use audit::{AuditEntry, Severity, from_sales, from_shifts, ranked, self_approved, unapproved};
 pub use directory::{Directory, DirectoryError, SignIn, StaffMember};
@@ -18,3 +19,4 @@ pub use role::{
     ApprovalPolicy, Authorization, Permission, Role, authorize, authorize_discount,
     authorize_discount_rate, authorize_void,
 };
+pub use session::{Presence, SESSION_IDLE_TIMEOUT_MILLIS, Session};

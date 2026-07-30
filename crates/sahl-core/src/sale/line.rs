@@ -104,6 +104,23 @@ impl SaleLine {
         Ok(price)
     }
 
+    /// What this line is worth before tax and before any discount.
+    ///
+    /// For deciding whether an action on the line needs approval — not for printing. The order
+    /// calculation owns the figures that reach a receipt, and this deliberately does not consult
+    /// the discount: a threshold that fell as a discount grew would let a large void through by
+    /// discounting it first.
+    ///
+    /// # Errors
+    /// [`MoneyError`] on overflow or a currency mismatch.
+    pub fn line_value(&self) -> Result<Money, MoneyError> {
+        self.effective_unit_price()?.mul_ratio(
+            self.quantity.milli(),
+            crate::quantity::Quantity::MILLI_PER_UNIT,
+            crate::money::Rounding::HalfUp,
+        )
+    }
+
     /// What the options add to one unit.
     ///
     /// # Errors

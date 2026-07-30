@@ -144,6 +144,8 @@ pub fn run() {
             commands::blind_stock_sheet,
             commands::staff_list,
             commands::sign_in,
+            commands::current_session,
+            commands::sign_out,
             commands::enrol_staff,
             commands::audit_feed,
             commands::anomaly_feed,

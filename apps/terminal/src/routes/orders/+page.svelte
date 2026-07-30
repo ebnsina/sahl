@@ -28,8 +28,6 @@
 		type OrderView
 	} from '$lib/till';
 
-	const STAFF = '00000000-0000-0000-0000-0000000000ca';
-
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
 	// A stand-in catalogue until the real one lands, matching the other screens' ids.
@@ -146,8 +144,7 @@
 					supplier,
 					reference: reference.trim() || null,
 					expectedAtMillis,
-					lines,
-					placedBy: STAFF
+					lines
 				}),
 			(result) => {
 				orders = result;
@@ -199,8 +196,7 @@
 					quantityMilli,
 					unitCostMinor,
 					lot: receiveLot.trim() || null,
-					expiresAtMillis,
-					receivedBy: STAFF
+					expiresAtMillis
 				}),
 			(result) => {
 				orders = result;
@@ -213,7 +209,7 @@
 		const orderId = closing;
 		if (!orderId) return;
 		void run(
-			() => till.closeOrder(orderId, closeReason, STAFF),
+			() => till.closeOrder(orderId, closeReason),
 			(result) => {
 				orders = result;
 				closing = null;

@@ -194,6 +194,15 @@ export interface OutletView {
 	capabilities: string[];
 	/** Absent where no scale prints labels, which is every outlet but a grocery. */
 	scale: ScaleFormatView | null;
+	/** What a cashier may do unaided. All zeros means everything needs somebody else. */
+	approval: ApprovalView;
+}
+
+/** The thresholds below which a cashier needs nobody else. */
+export interface ApprovalView {
+	discountLimitMinor: number;
+	discountRateBasisPoints: number;
+	voidLimitMinor: number;
 }
 
 /** How a counter scale lays out the labels it prints. */
@@ -442,7 +451,8 @@ export function asTillError(error: unknown): TillError {
 }
 
 export const till = {
-	openSale: (cashierId: string) => call<SaleView>('open_sale', { cashierId }),
+	/** No actor: the till uses whoever is signed in. An id the screen chose records nothing. */
+	openSale: () => call<SaleView>('open_sale'),
 
 	addLine: (input: {
 		saleId: string;
@@ -477,11 +487,9 @@ export const till = {
 		reference?: string | null;
 	}) => call<SaleView>('record_tender', input),
 
-	completeSale: (saleId: string, cashierId: string) =>
-		call<SaleView>('complete_sale', { saleId, cashierId }),
+	completeSale: (saleId: string) => call<SaleView>('complete_sale', { saleId }),
 
-	abandonSale: (saleId: string, abandonedBy: string) =>
-		call<SaleView>('abandon_sale', { saleId, abandonedBy }),
+	abandonSale: (saleId: string) => call<SaleView>('abandon_sale', { saleId }),
 
 	getSale: (saleId: string) => call<SaleView>('get_sale', { saleId }),
 
@@ -506,23 +514,17 @@ export const till = {
 	 * Records the firing before printing and never undoes it on a print failure — a rollback would
 	 * let the next press resend lines a station may already have on a half-printed slip.
 	 */
-	fireKitchen: (input: {
-		saleId: string;
-		printedAt: string;
-		paper: 'mm58' | 'mm80';
-		firedBy: string;
-	}) => call<FireOutcome>('fire_kitchen', input),
+	fireKitchen: (input: { saleId: string; printedAt: string; paper: 'mm58' | 'mm80' }) =>
+		call<FireOutcome>('fire_kitchen', input),
 
 	/** Abandon tickets with nothing on them. Never touches one holding items. */
-	discardEmptyTickets: (abandonedBy: string) =>
-		call<number>('discard_empty_tickets', { abandonedBy }),
+	discardEmptyTickets: () => call<number>('discard_empty_tickets'),
 
 	status: () => call<TillStatus>('till_status'),
 
 	syncStatus: () => call<SyncView>('sync_status'),
 
-	openShift: (cashierId: string, openingFloatMinor: number) =>
-		call<ShiftView>('open_shift', { cashierId, openingFloatMinor }),
+	openShift: (openingFloatMinor: number) => call<ShiftView>('open_shift', { openingFloatMinor }),
 
 	moveCash: (input: {
 		amountMinor: number;
@@ -531,8 +533,7 @@ export const till = {
 		pin: string;
 	}) => call<ShiftView>('move_cash', input),
 
-	countDrawer: (countedMinor: number, countedBy: string) =>
-		call<ShiftView>('count_drawer', { countedMinor, countedBy }),
+	countDrawer: (countedMinor: number) => call<ShiftView>('count_drawer', { countedMinor }),
 
 	/** The X report — where the shift stands, without ending it. */
 	shiftReport: () => call<ShiftView>('shift_report'),
@@ -545,8 +546,7 @@ export const till = {
 	 */
 	blindCountSheet: () => call<ShiftView>('blind_count_sheet'),
 
-	closeShift: (closedBy: string, closingCashMinor: number) =>
-		call<ShiftView>('close_shift', { closedBy, closingCashMinor }),
+	closeShift: (closingCashMinor: number) => call<ShiftView>('close_shift', { closingCashMinor }),
 
 	receiveStock: (input: {
 		productId: string;
@@ -555,14 +555,13 @@ export const till = {
 		quantityMilli: number;
 		unitCostMinor: number;
 		supplier?: string | null;
-		receivedBy: string;
 	}) => call<StockView>('receive_stock', input),
 
-	countStock: (batchId: string, countedMilli: number, countedBy: string) =>
-		call<StockView>('count_stock', { batchId, countedMilli, countedBy }),
+	countStock: (batchId: string, countedMilli: number) =>
+		call<StockView>('count_stock', { batchId, countedMilli }),
 
-	issueStock: (batchId: string, quantityMilli: number, reason: IssueReason, issuedBy: string) =>
-		call<StockView>('issue_stock', { batchId, quantityMilli, reason, issuedBy }),
+	issueStock: (batchId: string, quantityMilli: number, reason: IssueReason) =>
+		call<StockView>('issue_stock', { batchId, quantityMilli, reason }),
 
 	stockPosition: () => call<StockView>('stock_position'),
 
@@ -572,6 +571,14 @@ export const till = {
 	staffList: () => call<StaffView[]>('staff_list'),
 
 	signIn: (staffId: string, pin: string) => call<StaffView>('sign_in', { staffId, pin }),
+
+	/**
+	 * Who is at the till, or nobody. Asked rather than cached — a session expires by being read,
+	 * so a held copy would keep selling as somebody who walked away.
+	 */
+	currentSession: () => call<StaffView | null>('current_session'),
+
+	signOut: () => call<void>('sign_out'),
 
 	enrolStaff: (input: {
 		name: string;
@@ -610,8 +617,8 @@ export const till = {
 		call<TableView[]>('set_table_active', { tableId, active, pin }),
 
 	/** Seat a ticket, or move it to another table. */
-	seatSale: (saleId: string, tableId: string, covers: number, seatedBy: string) =>
-		call<SaleView>('seat_sale', { saleId, tableId, covers, seatedBy }),
+	seatSale: (saleId: string, tableId: string, covers: number) =>
+		call<SaleView>('seat_sale', { saleId, tableId, covers }),
 
 	allProducts: () => call<ProductView[]>('all_products'),
 
@@ -661,6 +668,7 @@ export const till = {
 		taxRegistration?: string | null;
 		address: string;
 		scale?: ScaleFormatView | null;
+		approval?: ApprovalView | null;
 		/** An owner's PIN. Ignored only before anyone is enrolled. */
 		pin: string;
 	}) => call<OutletView | null>('configure_outlet', input),
@@ -672,7 +680,6 @@ export const till = {
 		reference?: string | null;
 		expectedAtMillis?: number | null;
 		lines: Array<{ productId: string; quantityMilli: number; unitCostMinor: number }>;
-		placedBy: string;
 	}) => call<OrderView[]>('place_order', input),
 
 	/** Books the delivery against the order and onto the shelf in one atomic write. */
@@ -683,9 +690,8 @@ export const till = {
 		unitCostMinor: number;
 		lot?: string | null;
 		expiresAtMillis?: number | null;
-		receivedBy: string;
 	}) => call<OrderView[]>('receive_against_order', input),
 
-	closeOrder: (orderId: string, reason: CloseReason, closedBy: string) =>
-		call<OrderView[]>('close_order', { orderId, reason, closedBy })
+	closeOrder: (orderId: string, reason: CloseReason) =>
+		call<OrderView[]>('close_order', { orderId, reason })
 };

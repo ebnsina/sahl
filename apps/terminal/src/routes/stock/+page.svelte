@@ -30,8 +30,6 @@
 		type StockView
 	} from '$lib/till';
 
-	const STAFF = '00000000-0000-0000-0000-0000000000ca';
-
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
 	// A stand-in catalogue until the real one lands, matching the sell screen's ids.
@@ -149,8 +147,7 @@
 					expiresAtMillis,
 					quantityMilli,
 					unitCostMinor,
-					supplier: supplier.trim() || null,
-					receivedBy: STAFF
+					supplier: supplier.trim() || null
 				}),
 			(result) => {
 				stock = result;
@@ -183,7 +180,7 @@
 			return;
 		}
 		void run(
-			() => till.countStock(batchId, countedMilli, STAFF),
+			() => till.countStock(batchId, countedMilli),
 			(result) => {
 				stock = result;
 				sheet = null;
@@ -203,7 +200,7 @@
 			return;
 		}
 		void run(
-			() => till.issueStock(batchId, quantityMilli, issueReason, STAFF),
+			() => till.issueStock(batchId, quantityMilli, issueReason),
 			(result) => {
 				stock = result;
 				issueBatch = null;

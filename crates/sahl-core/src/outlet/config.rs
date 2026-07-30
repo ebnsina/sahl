@@ -9,6 +9,7 @@ use crate::time::Timestamp;
 
 use super::profile::Profile;
 use crate::scale::ScaleFormat;
+use crate::staff::ApprovalPolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OutletError {
@@ -94,6 +95,10 @@ pub struct OutletConfig {
     /// Set only where there is a scale printing labels. [`None`] means every barcode is an
     /// ordinary one, which is the correct reading for a shop that has never weighed anything.
     pub scale: Option<ScaleFormat>,
+    /// What a cashier may do on their own authority. Absent means the strictest setting — every
+    /// discount and every void needs somebody else, which is what a shop nobody has configured
+    /// should assume.
+    pub approval: ApprovalPolicy,
     pub configured_at: Timestamp,
 }
 
@@ -149,6 +154,7 @@ mod tests {
             tax_registration: Some("0031234567890".to_owned()),
             address: "12 Dhanmondi 27, Dhaka 1209".to_owned(),
             scale: None,
+            approval: ApprovalPolicy::strictest(Currency::Bdt),
             configured_at: Timestamp::from_millis(1_753_000_000_000),
         }
     }

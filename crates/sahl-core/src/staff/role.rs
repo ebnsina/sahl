@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::money::{Money, Rate};
+use crate::money::{Currency, Money, Rate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +90,22 @@ pub struct ApprovalPolicy {
     pub discount_rate_limit: Rate,
     /// Voids of lines up to this value may be done without approval.
     pub void_limit: Money,
+}
+
+impl ApprovalPolicy {
+    /// Every threshold at zero: nothing may be done without approval.
+    ///
+    /// The strictest setting, which is the only safe thing to assume about a shop nobody has
+    /// configured. Raising a limit is then a deliberate act by an owner rather than a number this
+    /// code picked for them.
+    #[must_use]
+    pub const fn strictest(currency: Currency) -> Self {
+        Self {
+            discount_limit: Money::zero(currency),
+            discount_rate_limit: Rate::ZERO,
+            void_limit: Money::zero(currency),
+        }
+    }
 }
 
 /// What an action needs before it may proceed.

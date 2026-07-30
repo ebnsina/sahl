@@ -26,6 +26,7 @@ use sahl_core::purchasing::{PurchaseError, PurchaseEvent, PurchaseOrder};
 use sahl_core::quantity::Quantity;
 use sahl_core::sale::{Sale, SaleError, SaleEvent};
 use sahl_core::shift::{Shift, ShiftError, ShiftEvent, ShiftReport, ShiftStatus};
+use sahl_core::staff::{Authorization, Presence, SESSION_IDLE_TIMEOUT_MILLIS, Session};
 use sahl_core::staff::{Directory, DirectoryError, Permission, SignIn, StaffEvent};
 use sahl_core::{Money, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -95,6 +96,10 @@ pub enum TerminalError {
     #[error("nobody at this outlet can approve that")]
     NoApprover,
 
+    /// No role carries this at all, so no PIN would help.
+    #[error("nobody with that role may do this")]
+    Denied,
+
     #[error("no shift is open")]
     NoOpenShift,
 
@@ -141,6 +146,9 @@ pub struct Terminal {
     outlet: Option<OutletConfig>,
     /// Several orders are open at once, unlike the single drawer — so a map, not an Option.
     orders: BTreeMap<Uuid, PurchaseOrder>,
+    /// Who is at the till right now. Ephemeral — a restart signs everybody out, which is the
+    /// behaviour a shared counter wants.
+    session: Presence,
     identity: DeviceIdentity,
 }
 
@@ -283,6 +291,7 @@ impl Terminal {
                         .map(|order| (order_id, order))
                 })
                 .collect(),
+            session: Presence::SignedOut,
             identity,
         })
     }
@@ -1145,13 +1154,94 @@ impl Terminal {
     ///
     /// # Errors
     /// [`TerminalError::NotAuthorized`] if the PIN does not match or the account is inactive.
-    pub fn sign_in(&self, staff_id: Uuid, pin: &str) -> Result<Uuid, TerminalError> {
+    pub fn sign_in(
+        &mut self,
+        staff_id: Uuid,
+        pin: &str,
+        now: Timestamp,
+    ) -> Result<Session, TerminalError> {
         match self.staff.sign_in(staff_id, pin)? {
-            SignIn::Ok { staff_id, .. } => Ok(staff_id),
+            SignIn::Ok { staff_id, role } => {
+                self.session = Presence::sign_in(staff_id, role, now);
+                self.session
+                    .current(now, SESSION_IDLE_TIMEOUT_MILLIS)
+                    .ok_or(TerminalError::NotAuthorized)
+            }
             SignIn::Unknown | SignIn::WrongPin | SignIn::Inactive => {
                 Err(TerminalError::NotAuthorized)
             }
         }
+    }
+
+    /// Who is at the till as of `now`, with their role read fresh from the directory.
+    ///
+    /// The role is re-resolved rather than trusted from the session: somebody demoted mid-shift
+    /// must not keep the authority they signed in with, and the session is not rebuilt on a
+    /// directory change. A person deactivated while signed in is nobody.
+    #[must_use]
+    pub fn current_session(&self, now: Timestamp) -> Option<Session> {
+        let session = self.session.current(now, SESSION_IDLE_TIMEOUT_MILLIS)?;
+        let member = self.staff.get(session.staff_id)?;
+        member.active.then_some(Session {
+            role: member.role,
+            ..session
+        })
+    }
+
+    /// Note that the person at the till did something, pushing back the idle clock.
+    pub fn touch(&mut self, now: Timestamp) {
+        self.session.touch(now, SESSION_IDLE_TIMEOUT_MILLIS);
+    }
+
+    pub const fn sign_out(&mut self) {
+        self.session.sign_out();
+    }
+
+    /// Who authorises an action the person at the till may be able to do themselves.
+    ///
+    /// `verdict` is the domain's answer for that person, which is why the threshold stays in
+    /// `sahl-core` rather than being re-derived here:
+    ///
+    /// - **Allowed** — recorded against the person who did it, with no PIN. Not an absence of
+    ///   control: it lands in the audit feed under their own name, which is what makes it
+    ///   reviewable afterwards.
+    /// - **NeedsApproval** — somebody senior types their own PIN and *they* are recorded. A cashier
+    ///   cannot approve their own, because the PIN has to belong to a holder of the permission.
+    /// - **Denied** — refused outright, whoever asks.
+    ///
+    /// With nobody signed in this falls through to the approval path, so an unattended till is
+    /// exactly as strict as it was before sessions existed.
+    ///
+    /// # Errors
+    /// [`TerminalError::Denied`] where no role may do it at all; [`TerminalError::NotAuthorized`]
+    /// or [`TerminalError::NoApprover`] when approval was needed and did not arrive.
+    pub fn authorize_for(
+        &self,
+        permission: Permission,
+        verdict: impl Fn(sahl_core::staff::Role, &sahl_core::staff::ApprovalPolicy) -> Authorization,
+        pin: &str,
+        now: Timestamp,
+    ) -> Result<Uuid, TerminalError> {
+        let policy = self.approval_policy();
+
+        if let Some(session) = self.current_session(now) {
+            match verdict(session.role, &policy) {
+                Authorization::Allowed => return Ok(session.staff_id),
+                Authorization::Denied => return Err(TerminalError::Denied),
+                Authorization::NeedsApproval { .. } => {}
+            }
+        }
+
+        self.approve(permission, pin)
+    }
+
+    /// What a cashier may do here unaided.
+    #[must_use]
+    pub fn approval_policy(&self) -> sahl_core::staff::ApprovalPolicy {
+        self.outlet.as_ref().map_or_else(
+            || sahl_core::staff::ApprovalPolicy::strictest(sahl_core::Currency::Bdt),
+            |outlet| outlet.approval,
+        )
     }
 
     /// Every batch this outlet knows about.
@@ -2680,6 +2770,7 @@ mod tests {
             tax_registration: Some("0031234567890".to_owned()),
             address: "12 Dhanmondi 27, Dhaka".to_owned(),
             scale: None,
+            approval: None,
         }
     }
 
@@ -3265,6 +3356,294 @@ mod tests {
         assert!(
             till.anomalies().expect("scans").is_empty(),
             "a leaver's history must not turn into alerts"
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Who is at the till
+    // ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn signing_in_puts_a_named_person_at_the_till() {
+        let mut till = staffed();
+        let session = till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+
+        assert_eq!(session.staff_id, id(CASHIER));
+        assert_eq!(session.role, sahl_core::staff::Role::Cashier);
+        assert_eq!(
+            till.current_session(at(0)).map(|s| s.staff_id),
+            Some(id(CASHIER))
+        );
+    }
+
+    #[test]
+    fn a_wrong_pin_leaves_the_till_as_it_was() {
+        let mut till = staffed();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+        assert!(till.sign_in(id(MANAGER), "0000", at(1)).is_err());
+
+        assert_eq!(
+            till.current_session(at(1)).map(|s| s.staff_id),
+            Some(id(CASHIER)),
+            "a failed attempt must not sign the previous person out"
+        );
+    }
+
+    #[test]
+    fn a_till_left_alone_has_nobody_at_it() {
+        let mut till = staffed();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+
+        assert!(
+            till.current_session(at(SESSION_IDLE_TIMEOUT_MILLIS + 1))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn somebody_deactivated_mid_shift_stops_being_at_the_till() {
+        // The session is not rebuilt when the directory changes, so the role — and whether the
+        // account exists at all — is read fresh on every ask.
+        let mut till = staffed();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+        till.record_staff(
+            &StaffEvent::Deactivated {
+                staff_id: id(CASHIER),
+                at: at(1),
+                deactivated_by: id(MANAGER),
+            },
+            id(70),
+            at(1),
+        )
+        .expect("deactivates");
+
+        assert!(till.current_session(at(2)).is_none());
+    }
+
+    #[test]
+    fn a_promotion_mid_shift_takes_effect_without_signing_out() {
+        // The mirror case, and the reason the role is re-resolved rather than trusted from the
+        // session: somebody demoted must not keep the authority they signed in with.
+        let mut till = staffed();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+        till.record_staff(
+            &StaffEvent::RoleChanged {
+                staff_id: id(CASHIER),
+                role: sahl_core::staff::Role::Manager,
+                at: at(1),
+                changed_by: id(MANAGER),
+            },
+            id(70),
+            at(1),
+        )
+        .expect("promotes");
+
+        assert_eq!(
+            till.current_session(at(2)).map(|s| s.role),
+            Some(sahl_core::staff::Role::Manager)
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_outlet_lets_nobody_do_anything_unaided() {
+        // The safe direction for a default to fall: every threshold at zero is exactly the
+        // behaviour the till had before thresholds existed.
+        let till = fresh();
+        let policy = till.approval_policy();
+
+        assert!(policy.discount_limit.is_zero());
+        assert!(policy.void_limit.is_zero());
+        assert!(policy.discount_rate_limit.is_zero());
+    }
+
+    #[test]
+    fn a_configured_limit_reaches_the_authorization_decision() {
+        use sahl_core::staff::{Authorization, Role, authorize_discount};
+
+        let mut till = fresh();
+        till.record_outlet(
+            &configure(sahl_core::outlet::OutletSettings {
+                approval: Some(sahl_core::staff::ApprovalPolicy {
+                    discount_limit: Money::from_minor(5_000, BDT),
+                    discount_rate_limit: sahl_core::money::Rate::from_basis_points(500),
+                    void_limit: Money::from_minor(5_000, BDT),
+                }),
+                ..outlet_settings()
+            }),
+            id(50),
+            at(0),
+        )
+        .expect("configures");
+
+        let policy = till.approval_policy();
+        assert_eq!(
+            authorize_discount(Role::Cashier, Money::from_minor(4_000, BDT), &policy),
+            Authorization::Allowed,
+            "under the limit, on their own authority"
+        );
+        assert!(matches!(
+            authorize_discount(Role::Cashier, Money::from_minor(6_000, BDT), &policy),
+            Authorization::NeedsApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn a_limit_written_before_thresholds_existed_reads_as_the_strictest_setting() {
+        // An outlet configured by an older build has no `approval` on its event. Falling back to
+        // anything permissive would quietly loosen a till that was already trading.
+        let settings: sahl_core::outlet::OutletSettings = serde_json::from_str(
+            r#"{"name":"Karim Store","profile":"retail","currency":"BDT",
+                "timezone":"Asia/Dhaka","regime":"none","tax_registration":null,
+                "address":"12 Dhanmondi 27, Dhaka"}"#,
+        )
+        .expect("deserialises");
+
+        assert_eq!(settings.approval, None);
+
+        let mut till = fresh();
+        till.record_outlet(&configure(settings), id(50), at(0))
+            .expect("configures");
+        assert!(till.approval_policy().discount_limit.is_zero());
+    }
+
+    /// A till with staff enrolled and a discount limit of 50.00.
+    fn with_limits() -> Terminal {
+        let mut till = staffed();
+        till.record_outlet(
+            &configure(sahl_core::outlet::OutletSettings {
+                approval: Some(sahl_core::staff::ApprovalPolicy {
+                    discount_limit: Money::from_minor(5_000, BDT),
+                    discount_rate_limit: sahl_core::money::Rate::from_basis_points(500),
+                    void_limit: Money::from_minor(5_000, BDT),
+                }),
+                ..outlet_settings()
+            }),
+            id(50),
+            at(0),
+        )
+        .expect("configures");
+        till
+    }
+
+    fn discount_of(
+        minor: i64,
+    ) -> impl Fn(sahl_core::staff::Role, &sahl_core::staff::ApprovalPolicy) -> Authorization {
+        move |role, policy| {
+            sahl_core::staff::authorize_discount(role, Money::from_minor(minor, BDT), policy)
+        }
+    }
+
+    #[test]
+    fn under_the_limit_a_cashier_needs_no_pin_and_is_recorded_themselves() {
+        // The point of the whole session. An empty PIN is passed deliberately: if the threshold
+        // were ignored this would fall through to the approval path and fail.
+        let mut till = with_limits();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+
+        let who = till
+            .authorize_for(Permission::ApplyDiscount, discount_of(4_000), "", at(1))
+            .expect("allowed");
+
+        assert_eq!(who, id(CASHIER), "recorded against the person who did it");
+    }
+
+    #[test]
+    fn over_the_limit_a_cashiers_own_pin_is_not_enough() {
+        // A cashier cannot approve their own: the PIN has to belong to somebody who holds the
+        // permission, and a cashier does not.
+        let mut till = with_limits();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+
+        assert!(matches!(
+            till.authorize_for(Permission::ApplyDiscount, discount_of(6_000), "8317", at(1)),
+            Err(TerminalError::NotAuthorized)
+        ));
+    }
+
+    #[test]
+    fn over_the_limit_a_managers_pin_authorises_and_records_the_manager() {
+        let mut till = with_limits();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+
+        let who = till
+            .authorize_for(Permission::ApplyDiscount, discount_of(6_000), "5294", at(1))
+            .expect("approved");
+
+        assert_eq!(
+            who,
+            id(MANAGER),
+            "the approver is recorded, not the cashier"
+        );
+    }
+
+    #[test]
+    fn exactly_at_the_limit_is_within_it() {
+        // Off by one here either blocks a round-number discount all day or lets one through.
+        let mut till = with_limits();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+
+        assert_eq!(
+            till.authorize_for(Permission::ApplyDiscount, discount_of(5_000), "", at(1))
+                .expect("allowed"),
+            id(CASHIER)
+        );
+    }
+
+    #[test]
+    fn an_unattended_till_is_exactly_as_strict_as_it_was_before_sessions() {
+        // Nobody signed in falls through to the approval path. A session that went idle must not
+        // become a way to do things with no PIN at all.
+        let till = with_limits();
+
+        assert!(
+            till.authorize_for(Permission::ApplyDiscount, discount_of(1_000), "", at(1))
+                .is_err()
+        );
+        assert_eq!(
+            till.authorize_for(Permission::ApplyDiscount, discount_of(1_000), "5294", at(1))
+                .expect("approved"),
+            id(MANAGER)
+        );
+    }
+
+    #[test]
+    fn an_idle_session_stops_letting_things_through_unaided() {
+        let mut till = with_limits();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+
+        assert!(
+            till.authorize_for(
+                Permission::ApplyDiscount,
+                discount_of(1_000),
+                "",
+                at(SESSION_IDLE_TIMEOUT_MILLIS + 1)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_till_lets_nothing_through_unaided() {
+        // Every threshold at zero, so this is the behaviour the till had before thresholds existed.
+        let mut till = staffed();
+        till.sign_in(id(CASHIER), "8317", at(0)).expect("signs in");
+
+        assert!(
+            till.authorize_for(Permission::ApplyDiscount, discount_of(1), "", at(1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_manager_at_the_till_needs_no_pin_at_any_size() {
+        // They hold the permission outright, so the threshold never enters into it.
+        let mut till = with_limits();
+        till.sign_in(id(MANAGER), "5294", at(0)).expect("signs in");
+
+        assert_eq!(
+            till.authorize_for(Permission::ApplyDiscount, discount_of(999_999), "", at(1))
+                .expect("allowed"),
+            id(MANAGER)
         );
     }
 

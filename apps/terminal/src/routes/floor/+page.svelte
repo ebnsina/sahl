@@ -14,8 +14,6 @@
 	import PinPrompt from '$lib/PinPrompt.svelte';
 	import { asTillError, isTillAvailable, till, type OutletView, type TableView } from '$lib/till';
 
-	const CASHIER = '00000000-0000-0000-0000-0000000000ca';
-
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
 	let tables = $state<TableView[]>([]);
@@ -161,8 +159,8 @@
 			async () => {
 				// A table is seated by opening a ticket for it. Nothing else in the product opens a
 				// ticket without a first item, which is exactly the café difference.
-				const sale = await till.openSale(CASHIER);
-				await till.seatSale(sale.id, table.id, count, CASHIER);
+				const sale = await till.openSale();
+				await till.seatSale(sale.id, table.id, count);
 				return till.floorPlan(true);
 			},
 			(result) => {

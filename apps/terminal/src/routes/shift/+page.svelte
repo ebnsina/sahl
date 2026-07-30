@@ -25,8 +25,6 @@
 	import PinPrompt from '$lib/PinPrompt.svelte';
 	import { asTillError, isTillAvailable, till, type CashReason, type ShiftView } from '$lib/till';
 
-	const CASHIER = '00000000-0000-0000-0000-0000000000ca';
-
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
 	const REASONS: Array<{ value: CashReason; label: string; sign: -1 | 1 }> = [
@@ -101,7 +99,7 @@
 		const minor = amount(floatInput, 'the opening float');
 		if (minor === null) return;
 		void run(
-			() => till.openShift(CASHIER, minor),
+			() => till.openShift(minor),
 			(result) => {
 				shift = result;
 				floatInput = '';
@@ -126,7 +124,7 @@
 		const minor = amount(countInput, 'the counted cash');
 		if (minor === null) return;
 		void run(
-			() => till.countDrawer(minor, CASHIER),
+			() => till.countDrawer(minor),
 			(result) => {
 				shift = result;
 				sheet = null;
@@ -187,7 +185,7 @@
 		const current = shift;
 		if (!current?.countedCashMinor) return;
 		void run(
-			() => till.closeShift(CASHIER, current.countedCashMinor ?? 0),
+			() => till.closeShift(current.countedCashMinor ?? 0),
 			(result) => (shift = result)
 		);
 	}
