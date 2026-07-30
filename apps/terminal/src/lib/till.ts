@@ -275,6 +275,18 @@ export interface ZatcaLineView {
 	totalWithVatMinor: number;
 }
 
+/** One thing the log says worth an owner's attention. */
+export interface FindingView {
+	kind: string;
+	severity: 'routine' | 'notable' | 'alert';
+	/** The person's name, or absent where it is about the outlet. */
+	person: string | null;
+	count: number;
+	amountMinor: number | null;
+	/** States what was counted. Never what it implies. */
+	summary: string;
+}
+
 /** What happened when a receipt was sent to a printer. */
 export interface PrintOutcome {
 	printed: boolean;
@@ -570,6 +582,9 @@ export const till = {
 	}) => call<StaffView[]>('enrol_staff', input),
 
 	auditFeed: () => call<AuditView[]>('audit_feed'),
+
+	/** What the log says about how the till is being used. Questions, not accusations. */
+	anomalyFeed: () => call<FindingView[]>('anomaly_feed'),
 
 	outletConfig: () => call<OutletView | null>('outlet_config'),
 

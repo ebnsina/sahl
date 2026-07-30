@@ -1037,6 +1037,44 @@ impl Terminal {
 }
 
 impl Terminal {
+    /// What the log says about how this till is being used.
+    ///
+    /// Read from the same projection the rest of the screen uses, so a finding can never describe
+    /// a day the till does not otherwise agree it had.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the log cannot be read or a sale is malformed.
+    pub fn anomalies(&self) -> Result<Vec<sahl_core::anomaly::Finding>, TerminalError> {
+        use std::collections::BTreeMap;
+
+        let audit = self.audit_entries()?;
+        let sales: Vec<&sahl_core::Sale> = self.book.completed().collect();
+
+        // Resolved for everyone the log names, including people who have since left. Reading only
+        // the active list would make a departed manager's old self-approvals look unauthorised —
+        // an alert about somebody who no longer works here, growing more numerous every month.
+        let roles: BTreeMap<Uuid, sahl_core::staff::Role> = audit
+            .iter()
+            .map(|entry| entry.actor)
+            .chain(sales.iter().map(|sale| sale.opened_by()))
+            .filter_map(|staff_id| self.staff.role_of(staff_id).map(|role| (staff_id, role)))
+            .collect();
+        let currency = self
+            .outlet
+            .as_ref()
+            .map_or(sahl_core::Currency::Bdt, |outlet| outlet.currency);
+
+        Ok(sahl_core::anomaly::scan(
+            &sahl_core::anomaly::Activity {
+                sales: &sales,
+                audit: &audit,
+                roles: &roles,
+                currency,
+            },
+            &sahl_core::anomaly::Sensitivity::starting_point(),
+        )?)
+    }
+
     /// What this shop sells.
     #[must_use]
     pub const fn catalogue(&self) -> &Catalogue {
@@ -3129,6 +3167,104 @@ mod tests {
                 .expect("builds")
                 .qr,
             None
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // What the log says about how the till is used
+    // ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_cashier_who_approved_their_own_void_reaches_the_feed() {
+        // End to end through the real log: the void is recorded, read back, and judged against the
+        // directory — the same path the screen takes.
+        let mut till = staffed();
+        ring_up(&mut till, 0x100, 11_500);
+        till.record(
+            &SaleEvent::LineVoided {
+                sale_id: id(0x100),
+                line_id: id(0x100 + 2),
+                reason: sahl_core::sale::VoidReason::Mistake,
+                authorized_by: id(CASHIER),
+            },
+            id(70),
+            at(4),
+        )
+        .expect("voids");
+
+        let findings = till.anomalies().expect("scans");
+        let flagged = findings
+            .iter()
+            .find(|finding| finding.kind == "self_approved")
+            .expect("found");
+
+        assert_eq!(flagged.person(), Some(id(CASHIER)));
+        assert_eq!(flagged.count, 1);
+    }
+
+    #[test]
+    fn a_manager_approving_a_cashiers_void_reaches_nothing() {
+        // The ordinary case, and by far the most common. If this produced a finding the feed would
+        // be useless within a day.
+        let mut till = staffed();
+        ring_up(&mut till, 0x100, 11_500);
+        till.record(
+            &SaleEvent::LineVoided {
+                sale_id: id(0x100),
+                line_id: id(0x100 + 2),
+                reason: sahl_core::sale::VoidReason::Mistake,
+                authorized_by: id(MANAGER),
+            },
+            id(70),
+            at(4),
+        )
+        .expect("voids");
+
+        assert!(till.anomalies().expect("scans").is_empty());
+    }
+
+    #[test]
+    fn a_till_that_has_only_sold_things_has_nothing_to_report() {
+        let mut till = staffed();
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+
+        assert!(till.anomalies().expect("scans").is_empty());
+    }
+
+    #[test]
+    fn a_departed_managers_old_self_approvals_do_not_become_alerts() {
+        // Roles are resolved for everyone the log names, not only the active list. Reading only
+        // active staff would turn every historical entry by a leaver into an alert about somebody
+        // who no longer works here, growing more numerous every month.
+        let mut till = staffed();
+        ring_up(&mut till, 0x100, 11_500);
+        till.record(
+            &SaleEvent::LineVoided {
+                sale_id: id(0x100),
+                line_id: id(0x100 + 2),
+                reason: sahl_core::sale::VoidReason::Mistake,
+                authorized_by: id(MANAGER),
+            },
+            id(70),
+            at(4),
+        )
+        .expect("voids");
+
+        till.record_staff(
+            &StaffEvent::Deactivated {
+                staff_id: id(MANAGER),
+                at: at(5),
+                deactivated_by: id(MANAGER),
+            },
+            id(71),
+            at(5),
+        )
+        .expect("deactivates");
+
+        assert!(
+            till.anomalies().expect("scans").is_empty(),
+            "a leaver's history must not turn into alerts"
         );
     }
 

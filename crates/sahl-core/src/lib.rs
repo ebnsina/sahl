@@ -28,6 +28,7 @@
     )
 )]
 
+pub mod anomaly;
 pub mod catalogue;
 pub mod event;
 pub mod floor;

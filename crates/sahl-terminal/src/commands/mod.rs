@@ -1006,6 +1006,51 @@ pub fn enrol_staff(
 ///
 /// Names are resolved here rather than in the webview, which has no staff list and should not need
 /// one. `unapproved` is the judged signal — self-approval by someone whose role did not carry it.
+/// One thing the log says worth an owner's attention.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FindingView {
+    pub kind: &'static str,
+    pub severity: &'static str,
+    /// The person's name, or absent where the finding is about the outlet.
+    pub person: Option<String>,
+    pub count: usize,
+    pub amount_minor: Option<i64>,
+    /// States what was counted. Never what it implies.
+    pub summary: String,
+}
+
+/// What the log says about how this till is being used.
+///
+/// Every finding is a question, not an accusation — see `sahl_core::anomaly`.
+#[tauri::command]
+pub fn anomaly_feed(
+    state: tauri::State<'_, TerminalState>,
+) -> Result<Vec<FindingView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    Ok(terminal
+        .anomalies()?
+        .into_iter()
+        .map(|finding| FindingView {
+            kind: finding.kind,
+            severity: severity_label(finding.severity),
+            person: finding.person().map(|id| {
+                terminal
+                    .staff()
+                    .get(id)
+                    .map_or_else(|| format!("Unknown ({id})"), |member| member.name.clone())
+            }),
+            count: finding.count,
+            amount_minor: finding.amount.map(|amount| amount.minor()),
+            summary: finding.summary,
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub fn audit_feed(state: tauri::State<'_, TerminalState>) -> Result<Vec<AuditView>, CommandError> {
     let terminal = state.inner.lock().map_err(|_| CommandError {

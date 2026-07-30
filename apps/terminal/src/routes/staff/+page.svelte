@@ -11,7 +11,14 @@
 	 */
 	import { Badge, Button, Card, Field, Input, Numeric, Select, createFormatters } from '@sahl/ui';
 	import PinPrompt from '$lib/PinPrompt.svelte';
-	import { asTillError, isTillAvailable, till, type AuditView, type StaffView } from '$lib/till';
+	import {
+		asTillError,
+		isTillAvailable,
+		till,
+		type AuditView,
+		type FindingView,
+		type StaffView
+	} from '$lib/till';
 
 	const format = createFormatters({ locale: 'en', currency: 'BDT', timeZone: 'Asia/Dhaka' });
 
@@ -31,6 +38,7 @@
 
 	let staff = $state<StaffView[]>([]);
 	let feed = $state<AuditView[]>([]);
+	let findings = $state<FindingView[]>([]);
 	let error = $state<{ code: string; message: string } | null>(null);
 	let busy = $state(false);
 	let available = $state(true);
@@ -62,6 +70,7 @@
 	async function refresh() {
 		staff = await till.staffList();
 		feed = await till.auditFeed();
+		findings = await till.anomalyFeed();
 		// Keeps the disabled select honest: it shows owner because owner is what will be sent.
 		if (staff.length === 0) role = 'owner';
 	}
@@ -196,6 +205,36 @@
 								<Badge tone={roleTone(member.role)}>
 									{ROLES.find((entry) => entry.value === member.role)?.label ?? member.role}
 								</Badge>
+							</div>
+						{/each}
+					{/if}
+				</Card>
+
+				<Card label="Worth a look" flush>
+					{#if findings.length === 0}
+						<p class="text-secondary text-text-muted p-4">
+							Nothing standing out. This compares each person against everyone else rather than
+							against a fixed rule, so a quiet week says nothing either way.
+						</p>
+					{:else}
+						<p class="text-secondary text-text-muted border-border border-b p-3">
+							Each of these has an innocent explanation. Whoever works the returns counter will
+							always void more. These are questions to ask, not conclusions.
+						</p>
+						{#each findings as finding (finding.kind + (finding.person ?? ''))}
+							<div class="border-border flex flex-wrap items-center gap-3 border-b px-3 py-2">
+								<div class="min-w-0 flex-1">
+									<p class="text-body">{finding.summary}</p>
+									{#if finding.person}
+										<p class="text-secondary text-text-muted">{finding.person}</p>
+									{/if}
+								</div>
+
+								{#if finding.amountMinor !== null}
+									<Numeric value={format.moneyPlain(finding.amountMinor)} />
+								{/if}
+
+								<Badge tone={severityTone(finding.severity)}>{finding.severity}</Badge>
 							</div>
 						{/each}
 					{/if}

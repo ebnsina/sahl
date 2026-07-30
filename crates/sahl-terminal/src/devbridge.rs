@@ -153,6 +153,10 @@ fn dispatch(path: &str, _body: &str, terminal: &Arc<Mutex<Terminal>>) -> (u16, S
             "regime": till.regime(),
         }),
 
+        "/anomalies" => {
+            serde_json::to_value(till.anomalies().unwrap_or_default()).unwrap_or_default()
+        }
+
         "/stock" => serde_json::json!({
             "levels": till.stock().levels(),
             "variances": till.stock().variances(),
