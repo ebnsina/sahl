@@ -283,6 +283,9 @@
 			<a href="/stock" class="text-secondary text-text-secondary hover:text-text underline">
 				Stock
 			</a>
+			<a href="/floor" class="text-secondary text-text-secondary hover:text-text underline">
+				Floor
+			</a>
 			<a href="/catalogue" class="text-secondary text-text-secondary hover:text-text underline">
 				Catalogue
 			</a>

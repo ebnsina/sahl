@@ -17,6 +17,7 @@ use argon2::password_hash::rand_core::OsRng;
 
 use sahl_core::Timestamp;
 use sahl_core::catalogue::{CatalogueEvent, ProductDetails, Unit};
+use sahl_core::floor::{FloorEvent, TableDetails};
 use sahl_core::inventory::{InventoryEvent, IssueReason};
 use sahl_core::money::{Currency, Money, Rate, Rounding};
 use sahl_core::outlet::{FiscalRegime, OutletEvent, OutletSettings, Profile};
@@ -88,7 +89,8 @@ impl From<TerminalError> for CommandError {
             | TerminalError::Inventory(_)
             | TerminalError::Outlet(_)
             | TerminalError::FiscalDocument(_)
-            | TerminalError::Catalogue(_) => "rejected",
+            | TerminalError::Catalogue(_)
+            | TerminalError::Floor(_) => "rejected",
             TerminalError::NotInvoiced { .. } => "not_invoiced",
             TerminalError::Directory(_) | TerminalError::Purchase(_) | TerminalError::Fiscal(_) => {
                 "rejected"
@@ -1785,4 +1787,204 @@ pub fn set_product_active(
 fn non_empty(value: String) -> Option<String> {
     let trimmed = value.trim().to_owned();
     (!trimmed.is_empty()).then_some(trimmed)
+}
+
+// -------------------------------------------------------------------------------------------
+// The floor — café only
+// -------------------------------------------------------------------------------------------
+
+/// A table as the floor plan shows it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableView {
+    pub id: Uuid,
+    pub label: String,
+    pub section: Option<String>,
+    pub seats: u32,
+    pub active: bool,
+    /// The open ticket sitting here, if any. Derived from the sales, never stored on the table.
+    pub sale_id: Option<Uuid>,
+    /// What that ticket has run up so far, so a waiter can read the room at a glance.
+    pub running_total_minor: Option<i64>,
+    pub covers: Option<u32>,
+}
+
+/// The floor plan, with each table's current ticket.
+#[tauri::command]
+pub fn floor_plan(
+    state: tauri::State<'_, TerminalState>,
+    include_removed: bool,
+) -> Result<Vec<TableView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let occupied = terminal.occupied_tables();
+    let tables = if include_removed {
+        terminal.floor().all()
+    } else {
+        terminal.floor().in_service()
+    };
+
+    Ok(tables
+        .into_iter()
+        .map(|table| {
+            let sale_id = occupied.get(&table.id).copied();
+            // Read off the sale rather than recomputed here — the running total is money, and this
+            // side of the boundary never computes money.
+            let sale = sale_id.and_then(|id| terminal.book().get(id));
+
+            TableView {
+                id: table.id,
+                label: table.label.clone(),
+                section: table.section.clone(),
+                seats: table.seats,
+                active: table.active,
+                sale_id,
+                running_total_minor: sale
+                    .and_then(|sale| sale.totals().ok())
+                    .map(|totals| totals.total.minor()),
+                covers: sale.and_then(|sale| sale.seating()).map(|seat| seat.covers),
+            }
+        })
+        .collect())
+}
+
+/// Add a table, or change one. `table_id` absent means a new table.
+#[tauri::command]
+pub fn save_table(
+    state: tauri::State<'_, TerminalState>,
+    table_id: Option<Uuid>,
+    label: String,
+    section: Option<String>,
+    seats: u32,
+    pin: String,
+) -> Result<Vec<TableView>, CommandError> {
+    let details = TableDetails {
+        label: label.trim().to_owned(),
+        section: section.and_then(non_empty),
+        seats,
+    };
+
+    // Changing the floor is a manager's job, not a waiter's: relabelling a table mid-service
+    // detaches every open ticket from the room the staff can see.
+    let authorized_by = authorize(&state, Permission::EditCatalogue, &pin)?;
+
+    {
+        let mut terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+
+        let event = match table_id {
+            Some(table_id) => FloorEvent::TableUpdated {
+                table_id,
+                details,
+                at: now(),
+                updated_by: authorized_by,
+            },
+            None => FloorEvent::TableAdded {
+                table_id: new_id(),
+                details,
+                at: now(),
+                added_by: authorized_by,
+            },
+        };
+
+        terminal.record_floor(&event, new_id(), now())?;
+    }
+
+    floor_plan(state, true)
+}
+
+/// Take a table out of service, or put it back.
+#[tauri::command]
+pub fn set_table_active(
+    state: tauri::State<'_, TerminalState>,
+    table_id: Uuid,
+    active: bool,
+    pin: String,
+) -> Result<Vec<TableView>, CommandError> {
+    let authorized_by = authorize(&state, Permission::EditCatalogue, &pin)?;
+
+    {
+        let mut terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+
+        // A table with an open ticket on it cannot leave service. The ticket would still exist,
+        // sitting at furniture the floor plan no longer shows, and nobody could find it to settle.
+        if !active && terminal.occupied_tables().contains_key(&table_id) {
+            return Err(CommandError {
+                code: "table_occupied",
+                message: "settle or move the ticket on this table first".to_owned(),
+            });
+        }
+
+        let event = if active {
+            FloorEvent::TableRestored {
+                table_id,
+                at: now(),
+                restored_by: authorized_by,
+            }
+        } else {
+            FloorEvent::TableRemoved {
+                table_id,
+                at: now(),
+                removed_by: authorized_by,
+            }
+        };
+
+        terminal.record_floor(&event, new_id(), now())?;
+    }
+
+    floor_plan(state, true)
+}
+
+/// Seat a ticket at a table, or move it to another one.
+#[tauri::command]
+pub fn seat_sale(
+    state: tauri::State<'_, TerminalState>,
+    sale_id: Uuid,
+    table_id: Uuid,
+    covers: u32,
+    seated_by: Uuid,
+) -> CommandResult {
+    {
+        let terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+
+        if terminal.floor().get(table_id).is_none() {
+            return Err(CommandError {
+                code: "unknown_table",
+                message: "no such table".to_owned(),
+            });
+        }
+
+        // Two parties on one table is a bill nobody can split correctly afterwards, so it is
+        // refused at the point of seating rather than discovered at payment.
+        if let Some(sitting) = terminal.occupied_tables().get(&table_id)
+            && *sitting != sale_id
+        {
+            return Err(CommandError {
+                code: "table_occupied",
+                message: "another ticket is already on that table".to_owned(),
+            });
+        }
+    }
+
+    apply(
+        &state,
+        &SaleEvent::Seated {
+            sale_id,
+            table_id,
+            covers,
+            at: now(),
+            seated_by,
+        },
+    )
 }

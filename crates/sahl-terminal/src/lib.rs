@@ -150,6 +150,10 @@ pub fn run() {
             commands::scan,
             commands::save_product,
             commands::set_product_active,
+            commands::floor_plan,
+            commands::save_table,
+            commands::set_table_active,
+            commands::seat_sale,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");

@@ -276,6 +276,9 @@
 			{/if}
 		</div>
 		<div class="flex gap-4">
+			<a href="/floor" class="text-secondary text-text-secondary hover:text-text underline">
+				Floor
+			</a>
 			<a href="/catalogue" class="text-secondary text-text-secondary hover:text-text underline">
 				Catalogue
 			</a>

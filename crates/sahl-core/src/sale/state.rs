@@ -58,6 +58,18 @@ pub struct Sale {
     settled_at: Option<Timestamp>,
     /// Which device owns this ticket, if any. Only meaningful while open.
     lease: Option<TicketLease>,
+    /// Where the party is sitting, for a café. `None` for every retail sale ever rung.
+    seating: Option<Seating>,
+}
+
+/// Where a ticket is sitting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Seating {
+    pub table_id: Uuid,
+    /// How many people, which is the denominator of every per-head figure a café cares about. Not
+    /// the table's seat count: a two-seat table often holds three.
+    pub covers: u32,
+    pub seated_at: Timestamp,
 }
 
 impl Sale {
@@ -105,6 +117,7 @@ impl Sale {
             change_given: None,
             settled_at: None,
             lease: None,
+            seating: None,
         })
     }
 
@@ -210,6 +223,24 @@ impl Sale {
                 if self.lease.is_some_and(|held| held.holder == *device_id) {
                     self.lease = None;
                 }
+            }
+
+            SaleEvent::Seated {
+                table_id,
+                covers,
+                at,
+                ..
+            } => {
+                if *covers == 0 {
+                    return Err(SaleError::NoCovers);
+                }
+                // Reassignment is a move, not an error. A party of two joined by four more does not
+                // start a new ticket, and neither does a table swap mid-service.
+                self.seating = Some(Seating {
+                    table_id: *table_id,
+                    covers: *covers,
+                    seated_at: *at,
+                });
             }
 
             SaleEvent::OrderDiscounted { discount, .. } => {
@@ -435,6 +466,12 @@ impl Sale {
     #[must_use]
     pub const fn currency(&self) -> Currency {
         self.currency
+    }
+
+    /// Where this ticket is sitting, for a café.
+    #[must_use]
+    pub const fn seating(&self) -> Option<Seating> {
+        self.seating
     }
 
     /// Every line, including voided ones. Voids are evidence and are never hidden from a caller

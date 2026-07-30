@@ -549,3 +549,113 @@ fn a_release_from_a_waiter_who_lost_the_ticket_is_ignored() {
 
     assert_eq!(sale.lease().expect("still held").holder, id(WAITER_A));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Seating — the café half
+// ---------------------------------------------------------------------------------------------
+
+const TABLE: u128 = 0x7AB1;
+
+fn seated(table: u128, covers: u32, millis: i64) -> SaleEvent {
+    SaleEvent::Seated {
+        sale_id: id(SALE),
+        table_id: id(table),
+        covers,
+        at: sahl_core::Timestamp::from_millis(millis),
+        seated_by: id(CASHIER),
+    }
+}
+
+#[test]
+fn a_retail_sale_is_never_seated() {
+    // Retail is the degenerate café: the same aggregate, with nothing sitting anywhere. This is
+    // what "the profile is a row, not a branch" has to mean in the order model.
+    let sale = Sale::replay(&[opened(), line(1, "Rice", 48_000, 1_000)]).expect("valid");
+    assert!(sale.seating().is_none());
+}
+
+#[test]
+fn seating_a_ticket_records_the_table_and_the_covers() {
+    let sale = Sale::replay(&[opened(), seated(TABLE, 3, 1_000)]).expect("valid");
+    let seating = sale.seating().expect("seated");
+
+    assert_eq!(seating.table_id, id(TABLE));
+    assert_eq!(
+        seating.covers, 3,
+        "three people at a two-seat table is normal"
+    );
+}
+
+#[test]
+fn a_ticket_can_be_ordered_before_it_is_seated() {
+    // A café takes an order before it knows where the party will sit as often as not, which is why
+    // seating is its own event rather than a field on `Opened`.
+    let sale = Sale::replay(&[
+        opened(),
+        line(1, "Flat white", 32_000, 1_000),
+        seated(TABLE, 2, 2_000),
+    ])
+    .expect("valid");
+
+    assert_eq!(sale.seating().expect("seated").table_id, id(TABLE));
+    assert_eq!(sale.active_lines().count(), 1);
+}
+
+#[test]
+fn moving_a_table_keeps_the_same_ticket() {
+    // A party of two joined by four more does not start a new ticket, and neither does a table
+    // swap mid-service. Reassignment is a move, not an error.
+    let sale = Sale::replay(&[
+        opened(),
+        line(1, "Flat white", 32_000, 1_000),
+        seated(TABLE, 2, 1_000),
+        seated(0x7AB2, 6, 5_000),
+    ])
+    .expect("valid");
+
+    let seating = sale.seating().expect("seated");
+    assert_eq!(seating.table_id, id(0x7AB2), "moved");
+    assert_eq!(seating.covers, 6, "and the party grew");
+    assert_eq!(sale.active_lines().count(), 1, "the order came with them");
+}
+
+#[test]
+fn a_seated_ticket_needs_at_least_one_cover() {
+    // Covers is the denominator of every per-head figure a café reports on, so zero is a division
+    // by zero waiting to happen rather than an empty table.
+    let result = Sale::replay(&[opened(), seated(TABLE, 0, 1_000)]);
+    assert_eq!(result, Err(SaleError::NoCovers));
+}
+
+#[test]
+fn a_seated_ticket_settles_like_any_other() {
+    // The café path must converge on exactly the retail one at payment; a second settlement path is
+    // a second set of money rules.
+    let sale = Sale::replay(&[
+        opened(),
+        seated(TABLE, 2, 1_000),
+        line(1, "Flat white", 32_000, 2_000),
+        SaleEvent::TenderRecorded {
+            sale_id: id(SALE),
+            tender_id: id(9),
+            method: TenderMethod::Cash,
+            amount: bdt(64_000),
+            reference: None,
+        },
+        SaleEvent::Completed {
+            sale_id: id(SALE),
+            total: bdt(64_000),
+            change_given: bdt(0),
+            at: sahl_core::Timestamp::from_millis(9_000),
+        },
+    ])
+    .expect("valid");
+
+    assert_eq!(sale.status(), SaleStatus::Completed);
+    assert_eq!(sale.totals().expect("totals").total, bdt(64_000));
+    assert_eq!(
+        sale.seating().expect("seated").covers,
+        2,
+        "and the covers survive settlement, for the per-head report"
+    );
+}

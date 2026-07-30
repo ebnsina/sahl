@@ -246,6 +246,9 @@
 			<a href="/staff" class="text-secondary text-text-secondary hover:text-text underline">
 				Staff
 			</a>
+			<a href="/floor" class="text-secondary text-text-secondary hover:text-text underline">
+				Floor
+			</a>
 			<a href="/catalogue" class="text-secondary text-text-secondary hover:text-text underline">
 				Catalogue
 			</a>

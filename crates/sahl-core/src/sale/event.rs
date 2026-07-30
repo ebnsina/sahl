@@ -112,6 +112,23 @@ pub enum SaleEvent {
     /// The holder gives the ticket up — handing a table over, or closing a shift.
     TicketReleased { sale_id: Uuid, device_id: Uuid },
 
+    /// The ticket was seated, or moved to another table.
+    ///
+    /// A separate event rather than a field on `Opened`, because a café takes an order before it
+    /// knows where the party will sit as often as not, and moving a table mid-service is ordinary —
+    /// a party of two joined by four more does not start a new ticket.
+    ///
+    /// Café only: `Capability::TableService`. A retail sale simply never carries one.
+    Seated {
+        sale_id: Uuid,
+        table_id: Uuid,
+        /// How many people. The denominator of every per-head figure a café cares about, and not
+        /// derivable from the table's seat count — a two-seat table often holds three.
+        covers: u32,
+        at: Timestamp,
+        seated_by: Uuid,
+    },
+
     /// The ticket is dropped without payment — a walkout, or a cart abandoned at close.
     ///
     /// Recorded rather than deleted: an abandoned ticket full of scanned goods is itself a signal
@@ -132,6 +149,7 @@ impl SaleEvent {
             | Self::OrderDiscounted { sale_id, .. }
             | Self::TicketClaimed { sale_id, .. }
             | Self::TicketReleased { sale_id, .. }
+            | Self::Seated { sale_id, .. }
             | Self::TenderRecorded { sale_id, .. }
             | Self::Completed { sale_id, .. }
             | Self::Abandoned { sale_id, .. } => *sale_id,
@@ -150,6 +168,7 @@ impl EventPayload for SaleEvent {
             Self::OrderDiscounted { .. } => "sale.order_discounted",
             Self::TicketClaimed { .. } => "sale.ticket_claimed",
             Self::TicketReleased { .. } => "sale.ticket_released",
+            Self::Seated { .. } => "sale.seated",
             Self::TenderRecorded { .. } => "sale.tender_recorded",
             Self::Completed { .. } => "sale.completed",
             Self::Abandoned { .. } => "sale.abandoned",

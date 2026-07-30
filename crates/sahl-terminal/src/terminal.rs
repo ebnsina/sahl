@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 
 use sahl_core::catalogue::{Catalogue, CatalogueError, CatalogueEvent};
 use sahl_core::event::{EventChain, EventEnvelope, EventHeader};
+use sahl_core::floor::{Floor, FloorError, FloorEvent};
 use sahl_core::inventory::{InventoryBook, InventoryError, InventoryEvent};
 use sahl_core::ledger::{FiscalChain, FiscalEvent, FiscalTip, InvoiceContent};
 use sahl_core::outlet::{OutletConfig, OutletError, OutletEvent};
@@ -65,6 +66,9 @@ pub enum TerminalError {
 
     #[error("{0}")]
     Catalogue(#[from] CatalogueError),
+
+    #[error("{0}")]
+    Floor(#[from] FloorError),
 
     #[error("{0}")]
     FiscalDocument(#[from] sahl_fiscal::FiscalError),
@@ -121,6 +125,7 @@ pub struct Terminal {
     stock: InventoryBook,
     staff: Directory,
     catalogue: Catalogue,
+    floor: Floor,
     /// The fiscal sequence. Separate from the event chain: that one proves the record of what
     /// happened is intact, this one proves the sequence of invoices is.
     fiscal: FiscalChain,
@@ -165,6 +170,7 @@ impl Terminal {
         let mut stock = InventoryBook::new();
         let mut staff = Directory::new();
         let mut catalogue = Catalogue::new();
+        let mut floor = Floor::new();
         let mut purchase_events: BTreeMap<Uuid, Vec<PurchaseEvent>> = BTreeMap::new();
         let mut fiscal_tip = FiscalTip::GENESIS;
         let mut outlet: Option<OutletConfig> = None;
@@ -197,6 +203,11 @@ impl Terminal {
                         // device's, so a duplicate or an edit to something not yet seen is expected
                         // rather than corrupt — the same posture the sale projection takes.
                         catalogue.apply(&event).ok();
+                    }
+                }
+                kind if kind.starts_with("floor.") => {
+                    if let Ok(event) = envelope.payload_as::<FloorEvent>() {
+                        floor.apply(&event).ok();
                     }
                 }
                 kind if kind.starts_with("staff.") => {
@@ -252,6 +263,7 @@ impl Terminal {
             stock,
             staff,
             catalogue,
+            floor,
             fiscal: FiscalChain::resume(identity.device_id, fiscal_tip),
             outlet,
             orders: purchase_events
@@ -847,6 +859,43 @@ impl Terminal {
     #[must_use]
     pub const fn catalogue(&self) -> &Catalogue {
         &self.catalogue
+    }
+
+    /// Validate, seal, persist, and project one floor event.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the event is invalid for the current state or cannot be persisted.
+    pub fn record_floor(
+        &mut self,
+        event: &FloorEvent,
+        event_id: Uuid,
+        occurred_at: Timestamp,
+    ) -> Result<(), TerminalError> {
+        let mut candidate = self.floor.clone();
+        candidate.apply(event)?;
+
+        self.seal(event, event_id, occurred_at)?;
+        self.floor = candidate;
+        Ok(())
+    }
+
+    /// The tables this outlet has.
+    #[must_use]
+    pub const fn floor(&self) -> &Floor {
+        &self.floor
+    }
+
+    /// Which table each open ticket is sitting at.
+    ///
+    /// Derived from the open sales rather than stored on the table. A table holding its own ticket
+    /// id has to be kept in step with the sale, and the two disagreeing is how a café ends up
+    /// unable to seat a table it can see is empty.
+    #[must_use]
+    pub fn occupied_tables(&self) -> BTreeMap<Uuid, Uuid> {
+        self.book
+            .open()
+            .filter_map(|sale| sale.seating().map(|seating| (seating.table_id, sale.id())))
+            .collect()
     }
 
     /// Who works here.
@@ -2772,5 +2821,121 @@ mod tests {
             Money::from_minor(52_000, BDT),
             "while the catalogue moved on"
         );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The floor
+    // ------------------------------------------------------------------------------------------
+
+    fn table_added(table: u128, label: &str, seats: u32) -> sahl_core::floor::FloorEvent {
+        sahl_core::floor::FloorEvent::TableAdded {
+            table_id: id(table),
+            details: sahl_core::floor::TableDetails {
+                label: label.to_owned(),
+                section: Some("Inside".to_owned()),
+                seats,
+            },
+            at: at(0),
+            added_by: id(0x0E),
+        }
+    }
+
+    #[test]
+    fn a_table_survives_a_restart() {
+        let store = EventStore::open_in_memory(id(3)).expect("opens");
+        let mut till = Terminal::load(store, identity()).expect("loads");
+        till.record_floor(&table_added(0x7AB1, "4", 4), id(70), at(0))
+            .expect("adds");
+
+        let (store, _) = till.into_parts();
+        let reloaded = Terminal::load(store, identity()).expect("reloads");
+
+        assert_eq!(reloaded.floor().in_service().len(), 1);
+        assert_eq!(reloaded.floor().capacity(), 4);
+    }
+
+    #[test]
+    fn an_empty_room_has_no_occupied_tables() {
+        let mut till = fresh();
+        till.record_floor(&table_added(0x7AB1, "4", 4), id(70), at(0))
+            .expect("adds");
+        assert!(till.occupied_tables().is_empty());
+    }
+
+    #[test]
+    fn seating_a_ticket_occupies_the_table_until_it_settles() {
+        // Occupancy is derived from the open sales. A table holding its own ticket id would need
+        // keeping in step with the sale, and the two disagreeing is how a café ends up unable to
+        // seat a table it can see is empty.
+        let mut till = fresh();
+        till.record_floor(&table_added(0x7AB1, "4", 4), id(70), at(0))
+            .expect("adds");
+        ring_up(&mut till, 0x100, 11_500);
+
+        till.record(
+            &SaleEvent::Seated {
+                sale_id: id(0x100),
+                table_id: id(0x7AB1),
+                covers: 2,
+                at: at(3),
+                seated_by: id(CASHIER),
+            },
+            id(71),
+            at(3),
+        )
+        .expect("seats");
+
+        assert_eq!(
+            till.occupied_tables().get(&id(0x7AB1)).copied(),
+            Some(id(0x100))
+        );
+
+        settle(&mut till, 0x100, 11_500);
+
+        assert!(
+            till.occupied_tables().is_empty(),
+            "a settled ticket frees its table with no extra event"
+        );
+    }
+
+    #[test]
+    fn moving_a_ticket_frees_the_table_it_left() {
+        let mut till = fresh();
+        till.record_floor(&table_added(0x7AB1, "4", 4), id(70), at(0))
+            .expect("adds");
+        till.record_floor(&table_added(0x7AB2, "5", 6), id(71), at(0))
+            .expect("adds");
+        ring_up(&mut till, 0x100, 11_500);
+
+        for (table, covers, event_id) in [(0x7AB1_u128, 2_u32, 72_u128), (0x7AB2, 6, 73)] {
+            till.record(
+                &SaleEvent::Seated {
+                    sale_id: id(0x100),
+                    table_id: id(table),
+                    covers,
+                    at: at(3),
+                    seated_by: id(CASHIER),
+                },
+                id(event_id),
+                at(3),
+            )
+            .expect("seats");
+        }
+
+        let occupied = till.occupied_tables();
+        assert!(
+            !occupied.contains_key(&id(0x7AB1)),
+            "the first table is free"
+        );
+        assert_eq!(occupied.get(&id(0x7AB2)).copied(), Some(id(0x100)));
+    }
+
+    #[test]
+    fn a_retail_sale_occupies_nothing() {
+        // Retail is the degenerate café. The same code path, with no table.
+        let mut till = fresh();
+        ring_up(&mut till, 0x100, 11_500);
+        settle(&mut till, 0x100, 11_500);
+        assert!(till.occupied_tables().is_empty());
     }
 }

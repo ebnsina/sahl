@@ -251,6 +251,19 @@ export interface ProductView {
 	active: boolean;
 }
 
+/** A table as the floor plan shows it. */
+export interface TableView {
+	id: string;
+	label: string;
+	section: string | null;
+	seats: number;
+	active: boolean;
+	/** The open ticket sitting here, if any. Derived from the sales, never stored on the table. */
+	saleId: string | null;
+	runningTotalMinor: number | null;
+	covers: number | null;
+}
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -417,6 +430,24 @@ export const till = {
 	printerConfigured: () => call<boolean>('printer_configured'),
 
 	sellableProducts: () => call<ProductView[]>('sellable_products'),
+
+	floorPlan: (includeRemoved = false) => call<TableView[]>('floor_plan', { includeRemoved }),
+
+	saveTable: (input: {
+		/** Absent for a new table. */
+		tableId?: string | null;
+		label: string;
+		section?: string | null;
+		seats: number;
+		pin: string;
+	}) => call<TableView[]>('save_table', input),
+
+	setTableActive: (tableId: string, active: boolean, pin: string) =>
+		call<TableView[]>('set_table_active', { tableId, active, pin }),
+
+	/** Seat a ticket, or move it to another table. */
+	seatSale: (saleId: string, tableId: string, covers: number, seatedBy: string) =>
+		call<SaleView>('seat_sale', { saleId, tableId, covers, seatedBy }),
 
 	allProducts: () => call<ProductView[]>('all_products'),
 

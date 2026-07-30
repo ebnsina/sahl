@@ -14,6 +14,11 @@ pub enum SaleError {
     #[error("money error in sale: {0}")]
     Money(#[from] MoneyError),
 
+    /// Covers is the denominator of every per-head figure a café reports on, so zero is a division
+    /// by zero waiting to happen rather than an empty table.
+    #[error("a seated ticket needs at least one cover")]
+    NoCovers,
+
     #[error("tax error in sale: {0}")]
     Tax(#[from] TaxError),
 
