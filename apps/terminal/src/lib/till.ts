@@ -284,6 +284,27 @@ export interface ZatcaLineView {
 	totalWithVatMinor: number;
 }
 
+/** A day, totalled. Every figure is computed in Rust; this only displays them. */
+export interface DayView {
+	currency: string;
+	sales: number;
+	takingsMinor: number;
+	netMinor: number;
+	taxMinor: number;
+	discountMinor: number;
+	averageSaleMinor: number;
+	voids: number;
+	byCashier: Array<{
+		name: string;
+		sales: number;
+		takingsMinor: number;
+		discountMinor: number;
+		voids: number;
+	}>;
+	byPayment: Array<{ method: string; count: number; takenMinor: number }>;
+	byProduct: Array<{ name: string; quantityMilli: number; revenueMinor: number }>;
+}
+
 /** One thing the log says worth an owner's attention. */
 export interface FindingView {
 	kind: string;
@@ -596,6 +617,9 @@ export const till = {
 	}) => call<StaffView[]>('enrol_staff', input),
 
 	auditFeed: () => call<AuditView[]>('audit_feed'),
+
+	/** A day, totalled. The same arithmetic the till sells with — never recomputed here. */
+	dayReport: () => call<DayView>('day_report'),
 
 	/** What the log says about how the till is being used. Questions, not accusations. */
 	anomalyFeed: () => call<FindingView[]>('anomaly_feed'),

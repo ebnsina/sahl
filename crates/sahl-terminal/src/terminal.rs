@@ -1108,6 +1108,18 @@ impl Terminal {
         Ok(())
     }
 
+    /// What this till has taken, totalled.
+    ///
+    /// Computed by `sahl-core` from the same projection every other figure comes from, so the
+    /// dashboard and the till cannot reach different answers for the same day.
+    ///
+    /// # Errors
+    /// [`TerminalError`] if the outlet is unconfigured or a sale is malformed.
+    pub fn day(&self) -> Result<sahl_core::report::Day, TerminalError> {
+        let sales: Vec<&sahl_core::Sale> = self.book.completed().collect();
+        Ok(sahl_core::report::Day::of(&sales, self.currency()?)?)
+    }
+
     /// What the log says about how this till is being used.
     ///
     /// Read from the same projection the rest of the screen uses, so a finding can never describe
@@ -1436,7 +1448,7 @@ impl Terminal {
 ///
 /// Written out rather than derived from `Debug`, which would put `MobileWallet { wallet: Bkash }`
 /// on a customer's receipt.
-fn tender_label(method: sahl_core::sale::TenderMethod) -> String {
+pub(crate) fn tender_label(method: sahl_core::sale::TenderMethod) -> String {
     use sahl_core::sale::TenderMethod as M;
     match method {
         M::Cash => "Cash".to_owned(),
@@ -4004,6 +4016,37 @@ mod tests {
         // meaning, and every total built on it inherits that.
         let till = fresh();
         assert!(matches!(till.currency(), Err(TerminalError::NotConfigured)));
+    }
+
+    #[test]
+    fn a_seeded_day_totals_to_what_the_till_took() {
+        // The report and the till must not reach different answers for the same day. They share the
+        // arithmetic precisely so they cannot, and this pins that they do.
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Bangladesh, at(0)).expect("seeds");
+
+        let day = till.day().expect("totals");
+        assert_eq!(day.takings, till.takings(BDT).expect("takings"));
+        assert!(day.sales > 0);
+        assert_eq!(
+            day.takings,
+            day.net.checked_add(day.tax).expect("adds"),
+            "net plus tax is what was taken"
+        );
+    }
+
+    #[test]
+    fn the_day_names_both_cashiers_and_nobody_else() {
+        let mut till = fresh();
+        crate::seed::seed(&mut till, crate::seed::Market::Gulf, at(0)).expect("seeds");
+
+        let day = till.day().expect("totals");
+        assert_eq!(day.by_cashier.len(), 2, "the two who rang sales");
+        assert!(
+            day.by_payment.len() >= 2,
+            "cash and card are counted apart: {:?}",
+            day.by_payment
+        );
     }
 
     #[test]

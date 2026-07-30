@@ -41,6 +41,7 @@ pub mod policy;
 pub mod projection;
 pub mod purchasing;
 pub mod quantity;
+pub mod report;
 pub mod sale;
 pub mod scale;
 pub mod shift;

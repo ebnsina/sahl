@@ -282,6 +282,9 @@
 			</a>
 			<a href="/stock" class="text-secondary text-text-secondary hover:text-text underline">Stock</a
 			>
+			<a href="/today" class="text-secondary text-text-secondary hover:text-text underline">
+				Today
+			</a>
 			<a href="/shift" class="text-secondary text-text-secondary hover:text-text underline">Shift</a
 			>
 			<a href="/staff" class="text-secondary text-text-secondary hover:text-text underline">

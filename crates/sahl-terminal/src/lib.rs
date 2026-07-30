@@ -174,6 +174,7 @@ pub fn run() {
             commands::enrol_staff,
             commands::audit_feed,
             commands::anomaly_feed,
+            commands::day_report,
             commands::place_order,
             commands::receive_against_order,
             commands::close_order,

@@ -1216,6 +1216,106 @@ pub struct FindingView {
     pub summary: String,
 }
 
+/// A day, totalled — takings, tax, who rang what, what sold.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayView {
+    pub currency: &'static str,
+    pub sales: usize,
+    pub takings_minor: i64,
+    pub net_minor: i64,
+    pub tax_minor: i64,
+    pub discount_minor: i64,
+    pub average_sale_minor: i64,
+    pub voids: usize,
+    pub by_cashier: Vec<CashierRowView>,
+    pub by_payment: Vec<PaymentRowView>,
+    pub by_product: Vec<ProductRowView>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CashierRowView {
+    pub name: String,
+    pub sales: usize,
+    pub takings_minor: i64,
+    pub discount_minor: i64,
+    pub voids: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentRowView {
+    pub method: String,
+    pub count: usize,
+    pub taken_minor: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductRowView {
+    pub name: String,
+    pub quantity_milli: i64,
+    pub revenue_minor: i64,
+}
+
+/// What this till has taken today.
+#[tauri::command]
+pub fn day_report(state: tauri::State<'_, TerminalState>) -> Result<DayView, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let day = terminal.day()?;
+    let name_of = |id: Uuid| {
+        terminal
+            .staff()
+            .get(id)
+            .map_or_else(|| format!("Unknown ({id})"), |member| member.name.clone())
+    };
+
+    Ok(DayView {
+        currency: day.currency.code(),
+        sales: day.sales,
+        takings_minor: day.takings.minor(),
+        net_minor: day.net.minor(),
+        tax_minor: day.tax.minor(),
+        discount_minor: day.discount.minor(),
+        average_sale_minor: day.average_sale.minor(),
+        voids: day.voids,
+        by_cashier: day
+            .by_cashier
+            .iter()
+            .map(|row| CashierRowView {
+                name: name_of(row.staff_id),
+                sales: row.sales,
+                takings_minor: row.takings.minor(),
+                discount_minor: row.discount.minor(),
+                voids: row.voids,
+            })
+            .collect(),
+        by_payment: day
+            .by_payment
+            .iter()
+            .map(|row| PaymentRowView {
+                method: crate::terminal::tender_label(row.method),
+                count: row.count,
+                taken_minor: row.taken.minor(),
+            })
+            .collect(),
+        by_product: day
+            .by_product
+            .iter()
+            .map(|row| ProductRowView {
+                name: row.name.clone(),
+                quantity_milli: row.quantity_milli,
+                revenue_minor: row.revenue.minor(),
+            })
+            .collect(),
+    })
+}
+
 /// What the log says about how this till is being used.
 ///
 /// Every finding is a question, not an accusation — see `sahl_core::anomaly`.

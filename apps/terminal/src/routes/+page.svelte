@@ -491,6 +491,9 @@
 				<span class="label-caps">Takings</span>
 				<Numeric value={format.money(status.takingsMinor)} class="font-semibold" />
 			{/if}
+			<a href="/today" class="text-secondary text-text-secondary hover:text-text underline">
+				Today
+			</a>
 			<a href="/shift" class="text-secondary text-text-secondary hover:text-text underline">
 				Shift
 			</a>

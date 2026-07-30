@@ -231,6 +231,9 @@
 			<a href="/orders" class="text-secondary text-text-secondary hover:text-text underline">
 				Orders
 			</a>
+			<a href="/today" class="text-secondary text-text-secondary hover:text-text underline">
+				Today
+			</a>
 			<a href="/shift" class="text-secondary text-text-secondary hover:text-text underline">Shift</a
 			>
 			<a href="/staff" class="text-secondary text-text-secondary hover:text-text underline">
