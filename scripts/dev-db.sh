@@ -32,18 +32,10 @@ BEGIN
   END IF;
 END
 \$\$;
-GRANT USAGE ON SCHEMA public TO sahl_app;
-GRANT SELECT, INSERT, UPDATE ON tenant, outlet, app_user, device, enrollment_token, dashboard_token TO sahl_app;
-GRANT SELECT, INSERT ON event TO sahl_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sahl_app;
--- REVOKEd from PUBLIC by migration 0002, so the runtime role needs it explicitly. Without this
--- every request fails authentication, and only a non-superuser run reveals that.
-GRANT EXECUTE ON FUNCTION device_tenant(UUID) TO sahl_app;
-GRANT EXECUTE ON FUNCTION enrollment_token_for_digest(BYTEA) TO sahl_app;
--- Same shape and same reason as the enrollment lookup: the tenant is only known *from* the row,
--- so the digest lookup has to run before the transaction can be scoped to anything.
-GRANT EXECUTE ON FUNCTION dashboard_token_for_digest(BYTEA) TO sahl_app;
-GRANT EXECUTE ON FUNCTION outlet_tenant(UUID) TO sahl_app;
 SQL
+
+# One list, shared with CI. See scripts/grants.sql.
+psql -v ON_ERROR_STOP=1 -d "${DB}" -f scripts/grants.sql >/dev/null
+
 
 echo "ready:  export SAHL_TEST_DATABASE_URL=\"postgres://sahl_app:dev@localhost:5432/${DB}\""

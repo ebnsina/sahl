@@ -90,15 +90,9 @@ jobs:
           done
           psql -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE sahl_app LOGIN PASSWORD 'ci' NOSUPERUSER NOBYPASSRLS;
-          GRANT USAGE ON SCHEMA public TO sahl_app;
-          GRANT SELECT, INSERT, UPDATE ON tenant, outlet, app_user, device, enrollment_token TO sahl_app;
-          GRANT SELECT, INSERT ON event TO sahl_app;
-          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sahl_app;
-          -- device_tenant is REVOKEd from PUBLIC by its migration, so the runtime role needs an
-          -- explicit grant. Without it every request fails authentication.
-          GRANT EXECUTE ON FUNCTION device_tenant(UUID) TO sahl_app;
-          GRANT EXECUTE ON FUNCTION enrollment_token_for_digest(BYTEA) TO sahl_app;
           SQL
+          # One list, shared with the dev script. See scripts/grants.sql.
+          psql -v ON_ERROR_STOP=1 -f scripts/grants.sql
 
       # Includes the property suites (money allocation laws, VAT invariants, chain-integrity
       # fuzzing) and the sync ingest suite against the database above.
@@ -156,14 +150,9 @@ jobs:
         run: |
           psql -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE sahl_app LOGIN PASSWORD 'ci' NOSUPERUSER NOBYPASSRLS;
-          GRANT SELECT, INSERT, UPDATE ON tenant, outlet, app_user, device, enrollment_token TO sahl_app;
-          GRANT SELECT, INSERT ON event TO sahl_app;
-          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sahl_app;
-          -- device_tenant is REVOKEd from PUBLIC by its migration, so the runtime role needs an
-          -- explicit grant. Without it every request fails authentication.
-          GRANT EXECUTE ON FUNCTION device_tenant(UUID) TO sahl_app;
-          GRANT EXECUTE ON FUNCTION enrollment_token_for_digest(BYTEA) TO sahl_app;
           SQL
+          # One list, shared with the dev script. See scripts/grants.sql.
+          psql -v ON_ERROR_STOP=1 -f scripts/grants.sql
 
       - name: Seed two merchants
         run: |

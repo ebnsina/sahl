@@ -26,26 +26,10 @@ a superuser, before first deploy:
 ```sql
 CREATE ROLE sahl_app LOGIN PASSWORD '...' NOSUPERUSER NOBYPASSRLS;
 
-GRANT SELECT, INSERT, UPDATE ON tenant, outlet, app_user, device, enrollment_token, dashboard_token TO sahl_app;
-
--- The event log is append-only. No UPDATE or DELETE grant is issued, and a trigger blocks both
--- even if one is granted by mistake — verified, not assumed.
-GRANT SELECT, INSERT ON event TO sahl_app;
-
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO sahl_app;
-
--- device_tenant() resolves a device to its tenant before RLS can be scoped — the one lookup that
--- must run unscoped. Its migration REVOKEs it from PUBLIC, so the runtime role needs this grant
--- explicitly. Without it every signed request fails authentication with an opaque 401.
-GRANT EXECUTE ON FUNCTION device_tenant(UUID) TO sahl_app;
-GRANT EXECUTE ON FUNCTION enrollment_token_for_digest(BYTEA) TO sahl_app;
-GRANT EXECUTE ON FUNCTION dashboard_token_for_digest(BYTEA) TO sahl_app;
-GRANT EXECUTE ON FUNCTION outlet_tenant(UUID) TO sahl_app;
-
--- Startup verifies the schema is current before it serves, and it does that as the runtime role.
--- Without this the server refuses to boot with "could not read migration state", which reads like
--- a database outage rather than a missing grant.
-GRANT SELECT ON _sqlx_migrations TO sahl_app;
+-- The rest of the list lives in scripts/grants.sql, applied by the dev script and by CI so
+-- the three cannot drift. A table added to the schema needs a line there, or the runtime
+-- role fails on it with a permission error nobody can reproduce locally.
+\i scripts/grants.sql
 ```
 
 Migrations themselves need DDL rights, so run them as the owning role and let the server connect as
