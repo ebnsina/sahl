@@ -16,7 +16,7 @@ use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
 
 use sahl_core::Timestamp;
-use sahl_core::catalogue::{CatalogueEvent, ProductDetails, Unit};
+use sahl_core::catalogue::{CatalogueEvent, ModifierGroup, ProductDetails, Unit};
 use sahl_core::floor::{FloorEvent, TableDetails};
 use sahl_core::inventory::{InventoryEvent, IssueReason};
 use sahl_core::money::{Currency, Money, Rate, Rounding};
@@ -187,6 +187,8 @@ pub fn add_line(
     tax_basis_points: i32,
     // `standard`, `zero_rated`, or `exempt`.
     tax_treatment: String,
+    // Option ids chosen at the till. Validated against the product's groups by the terminal.
+    chosen_options: Vec<Uuid>,
     currency: String,
 ) -> CommandResult {
     let currency = Currency::from_code(&currency).map_err(|error| CommandError {
@@ -197,6 +199,14 @@ pub fn add_line(
     let unit_price = Money::from_minor(unit_price_minor, currency);
     let quantity = Quantity::from_milli(quantity_milli);
     let tax_class = tax_class(&tax_treatment, tax_basis_points)?;
+
+    let modifiers = {
+        let terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+        terminal.resolve_modifiers(product_id, &chosen_options)?
+    };
 
     // Tapping the same item twice should read as "two of those", not two identical rows a cashier
     // has to scroll past. Matched on everything that makes a line the same supply — a different
@@ -214,6 +224,9 @@ pub fn add_line(
             let same_supply = line.product_id == product_id
                 && line.unit_price == unit_price
                 && line.tax_class == tax_class
+                // Options make two lines different supplies even for one product. A latte with an
+                // extra shot and a latte without are two drinks the kitchen has to make separately.
+                && line.modifiers == modifiers
                 // A discounted line keeps its own row: merging would silently spread one line's
                 // reduction across units that were never discounted.
                 && matches!(line.discount, Discount::None);
@@ -1571,6 +1584,51 @@ pub fn printer_configured(printer: tauri::State<'_, PrinterTarget>) -> bool {
 // Catalogue
 // -------------------------------------------------------------------------------------------
 
+/// One choice within a group, as a screen shows it.
+///
+/// A view rather than the core type: every amount that crosses this boundary is a plain integer of
+/// minor units, and `Money` serialises as an object. Leaking it here would make this one field the
+/// only place the UI has to know a second money shape.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModifierOptionView {
+    pub id: Uuid,
+    pub name: String,
+    /// What choosing it adds to one unit. Zero and negative are both real.
+    pub price_delta_minor: i64,
+}
+
+/// A set of choices offered on a product.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModifierGroupView {
+    pub id: Uuid,
+    pub name: String,
+    pub min: u8,
+    pub max: u8,
+    pub options: Vec<ModifierOptionView>,
+}
+
+impl ModifierGroupView {
+    fn of(group: &ModifierGroup) -> Self {
+        Self {
+            id: group.id,
+            name: group.name.clone(),
+            min: group.min,
+            max: group.max,
+            options: group
+                .options
+                .iter()
+                .map(|option| ModifierOptionView {
+                    id: option.id,
+                    name: option.name.clone(),
+                    price_delta_minor: option.price_delta.minor(),
+                })
+                .collect(),
+        }
+    }
+}
+
 /// A product as the sell screen and the catalogue screen show it.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1589,6 +1647,8 @@ pub struct ProductView {
     pub tax_treatment: &'static str,
     pub category: Option<String>,
     pub active: bool,
+    /// Choices offered when this is rung, so the sell screen can draw the chooser.
+    pub option_groups: Vec<ModifierGroupView>,
 }
 
 impl ProductView {
@@ -1611,6 +1671,11 @@ impl ProductView {
             tax_treatment,
             category: product.category.clone(),
             active: product.active,
+            option_groups: product
+                .option_groups
+                .iter()
+                .map(ModifierGroupView::of)
+                .collect(),
         }
     }
 }
@@ -1693,6 +1758,8 @@ pub fn save_product(
     tax_basis_points: i32,
     tax_treatment: String,
     category: Option<String>,
+    // Choices this product offers. Validated by the catalogue before it is written.
+    option_groups: Vec<ModifierGroupInput>,
     pin: String,
 ) -> Result<Vec<ProductView>, CommandError> {
     let unit = Unit::from_label(&unit).map_err(|_| CommandError {
@@ -1708,6 +1775,26 @@ pub fn save_product(
         unit,
         tax_class: tax_class(&tax_treatment, tax_basis_points)?,
         category: category.and_then(non_empty),
+        option_groups: option_groups
+            .into_iter()
+            .map(|group| ModifierGroup {
+                // A new group or option gets an id here rather than from the UI: an id minted by a
+                // screen is one two screens can collide on.
+                id: group.id.unwrap_or_else(new_id),
+                name: group.name.trim().to_owned(),
+                min: group.min,
+                max: group.max,
+                options: group
+                    .options
+                    .into_iter()
+                    .map(|option| sahl_core::catalogue::ModifierOption {
+                        id: option.id.unwrap_or_else(new_id),
+                        name: option.name.trim().to_owned(),
+                        price_delta: Money::from_minor(option.price_delta_minor, Currency::Bdt),
+                    })
+                    .collect(),
+            })
+            .collect(),
     };
 
     let authorized_by = authorize(&state, Permission::EditCatalogue, &pin)?;
@@ -1779,6 +1866,25 @@ pub fn set_product_active(
         .into_iter()
         .map(ProductView::of)
         .collect())
+}
+
+/// A group as the catalogue screen sends it. Ids are absent for anything newly added.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModifierGroupInput {
+    pub id: Option<Uuid>,
+    pub name: String,
+    pub min: u8,
+    pub max: u8,
+    pub options: Vec<ModifierOptionInput>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModifierOptionInput {
+    pub id: Option<Uuid>,
+    pub name: String,
+    pub price_delta_minor: i64,
 }
 
 /// Trim, and treat an empty string as absent.

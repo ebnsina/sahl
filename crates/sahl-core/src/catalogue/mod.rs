@@ -10,8 +10,10 @@
 
 mod book;
 mod event;
+mod options;
 mod product;
 
 pub use book::Catalogue;
 pub use event::{CatalogueEvent, ProductDetails};
+pub use options::{ModifierGroup, ModifierOption};
 pub use product::{CatalogueError, Product, Unit};

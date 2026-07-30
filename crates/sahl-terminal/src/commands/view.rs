@@ -26,6 +26,17 @@ pub struct LineView {
     pub tax_minor: i64,
     /// A voided line stays in the list, struck through. Hiding it would hide the evidence.
     pub voided: bool,
+    /// Options chosen on this line, so the basket shows what the kitchen was told.
+    pub modifiers: Vec<LineModifierView>,
+}
+
+/// One option on a line.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LineModifierView {
+    pub name: String,
+    /// What it added to one unit. Zero and negative are both real.
+    pub price_delta_minor: i64,
 }
 
 /// A tax-summary row, as printed on the receipt.
@@ -128,6 +139,7 @@ impl SaleView {
                             total_minor: totals.total.minor(),
                             tax_minor: totals.tax.minor(),
                             voided: false,
+                            modifiers: modifiers_of(line),
                         },
                     )
                 } else {
@@ -175,7 +187,19 @@ fn empty_line(line: &sahl_core::sale::SaleLine) -> LineView {
         total_minor: 0,
         tax_minor: 0,
         voided: !line.is_active(),
+        modifiers: modifiers_of(line),
     }
+}
+
+/// The options a line carries, for display.
+fn modifiers_of(line: &sahl_core::sale::SaleLine) -> Vec<LineModifierView> {
+    line.modifiers
+        .iter()
+        .map(|modifier| LineModifierView {
+            name: modifier.name.clone(),
+            price_delta_minor: modifier.price_delta.minor(),
+        })
+        .collect()
 }
 
 fn tenders_of(sale: &Sale) -> Vec<TenderView> {

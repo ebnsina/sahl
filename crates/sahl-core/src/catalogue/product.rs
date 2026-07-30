@@ -23,6 +23,17 @@ pub enum CatalogueError {
 
     #[error("barcode {barcode} is already on product {product_id}")]
     DuplicateBarcode { barcode: String, product_id: Uuid },
+
+    #[error("{name} allows {min} to {max} choices, which nobody could satisfy")]
+    BadGroupBounds { name: String, min: u8, max: u8 },
+
+    #[error("{group} needs {min} to {max} choices, {chosen} were made")]
+    ChoiceCount {
+        group: String,
+        min: u8,
+        max: u8,
+        chosen: usize,
+    },
 }
 
 /// How a supply is counted.
@@ -121,6 +132,11 @@ pub struct Product {
     pub tax_class: TaxClass,
     /// Grouping for reports and for the sell screen's layout.
     pub category: Option<String>,
+    /// Choices offered when this is rung — size, milk, extras.
+    ///
+    /// `default` so products saved before options existed still deserialize.
+    #[serde(default)]
+    pub option_groups: Vec<super::options::ModifierGroup>,
     /// Whether it appears on the sell screen. Withdrawn products stay in the catalogue because
     /// past sales reference them, and a sale pointing at nothing is a report nobody can read.
     pub active: bool,
@@ -143,6 +159,9 @@ impl Product {
         if self.barcodes.iter().any(|code| code.trim().is_empty()) {
             return Err(CatalogueError::Blank { field: "barcode" });
         }
+        for group in &self.option_groups {
+            group.validate()?;
+        }
         Ok(())
     }
 }
@@ -162,6 +181,7 @@ mod tests {
             unit: Unit::Piece,
             tax_class: TaxClass::standard(1500),
             category: Some("Staples".to_owned()),
+            option_groups: Vec::new(),
             active: true,
         }
     }

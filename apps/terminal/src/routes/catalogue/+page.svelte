@@ -25,6 +25,7 @@
 		asTillError,
 		isTillAvailable,
 		till,
+		type ModifierGroup,
 		type ProductView,
 		type TaxTreatment
 	} from '$lib/till';
@@ -74,6 +75,16 @@
 	let treatment = $state<TaxTreatment>('standard');
 	let rate = $state('1500');
 	let category = $state('');
+	/** Option groups being edited. Ids are null for anything newly added; the till mints them. */
+	let groups = $state<
+		Array<{
+			id: string | null;
+			name: string;
+			min: number;
+			max: number;
+			options: Array<{ id: string | null; name: string; price: string }>;
+		}>
+	>([]);
 
 	let pendingSave = $state(false);
 	let pendingToggle = $state<ProductView | null>(null);
@@ -127,6 +138,7 @@
 		treatment = 'standard';
 		rate = '1500';
 		category = '';
+		groups = [];
 		showForm = true;
 	}
 
@@ -142,7 +154,27 @@
 		treatment = product.taxTreatment;
 		rate = String(product.taxBasisPoints || 1500);
 		category = product.category ?? '';
+		groups = product.optionGroups.map((group) => ({
+			id: group.id,
+			name: group.name,
+			min: group.min,
+			max: group.max,
+			options: group.options.map((option) => ({
+				id: option.id,
+				name: option.name,
+				price: minorToDecimalString(option.priceDeltaMinor, 2)
+			}))
+		}));
 		showForm = true;
+	}
+
+	function addGroup() {
+		// Defaults to a required single choice, because "size" is the group almost everyone adds
+		// first and the one that is wrong as a multi-select.
+		groups = [
+			...groups,
+			{ id: null, name: '', min: 1, max: 1, options: [{ id: null, name: '', price: '0' }] }
+		];
 	}
 
 	function startSave() {
@@ -176,6 +208,18 @@
 						.map((code) => code.trim())
 						.filter(Boolean),
 					priceMinor,
+					optionGroups: groups.map((group) => ({
+						id: group.id,
+						name: group.name,
+						min: group.min,
+						max: group.max,
+						options: group.options.map((option) => ({
+							id: option.id,
+							name: option.name,
+							// A delta can be negative — "no cheese, less 20" — so this parses signed.
+							priceDeltaMinor: parseMinor(option.price, 'BDT') ?? 0
+						}))
+					})),
 					unit,
 					// Only read for a standard supply; zero-rated and exempt carry no rate.
 					taxBasisPoints: treatment === 'standard' ? Number(rate) : 0,
@@ -418,6 +462,138 @@
 									<Input {id} {describedBy} bind:value={category} placeholder="Staples" />
 								{/snippet}
 							</Field>
+
+							<div class="border-border flex flex-col gap-3 border-t pt-3">
+								<div class="flex items-baseline justify-between">
+									<span class="label-caps">Options</span>
+									<Button variant="ghost" size="xs" onclick={addGroup} disabled={busy}>
+										Add a group
+									</Button>
+								</div>
+
+								{#if groups.length === 0}
+									<p class="text-secondary text-text-muted">
+										None. A product with no options is rung with one tap; one with options asks
+										first.
+									</p>
+								{/if}
+
+								{#each groups as group, groupIndex (groupIndex)}
+									<div class="border-border flex flex-col gap-2 border p-3">
+										<div class="flex items-end gap-2">
+											<Field id="group-name-{groupIndex}" label="Group" class="flex-1">
+												{#snippet children({ id, describedBy })}
+													<Input {id} {describedBy} bind:value={group.name} placeholder="Size" />
+												{/snippet}
+											</Field>
+											<Button
+												variant="ghost"
+												size="xs"
+												onclick={() => groups.splice(groupIndex, 1)}
+												disabled={busy}
+											>
+												Remove
+											</Button>
+										</div>
+
+										<Field
+											id="group-kind-{groupIndex}"
+											label="How many"
+											hint="A size is one of; extras are any number."
+										>
+											{#snippet children({ id, describedBy })}
+												<Select
+													{id}
+													{describedBy}
+													value={group.min === 1 && group.max === 1
+														? 'one'
+														: group.max === 1
+															? 'upto-one'
+															: 'many'}
+													onchange={(event) => {
+														const kind = (event.target as HTMLSelectElement).value;
+														// Bounds rather than a mode flag, because the till validates
+														// against min and max and a second representation could disagree.
+														if (kind === 'one') {
+															group.min = 1;
+															group.max = 1;
+														} else if (kind === 'upto-one') {
+															group.min = 0;
+															group.max = 1;
+														} else {
+															group.min = 0;
+															group.max = Math.max(2, group.options.length);
+														}
+													}}
+													options={[
+														{ value: 'one', label: 'Exactly one — required' },
+														{ value: 'upto-one', label: 'Up to one — optional' },
+														{ value: 'many', label: 'Any number' }
+													]}
+												/>
+											{/snippet}
+										</Field>
+
+										{#each group.options as option, optionIndex (optionIndex)}
+											<div class="flex items-end gap-2">
+												<Field
+													id="option-name-{groupIndex}-{optionIndex}"
+													label="Choice"
+													class="flex-1"
+												>
+													{#snippet children({ id, describedBy })}
+														<Input
+															{id}
+															{describedBy}
+															bind:value={option.name}
+															placeholder="Large"
+														/>
+													{/snippet}
+												</Field>
+												<Field
+													id="option-price-{groupIndex}-{optionIndex}"
+													label="Adds"
+													class="w-24"
+												>
+													{#snippet children({ id, describedBy })}
+														<Input
+															{id}
+															{describedBy}
+															bind:value={option.price}
+															numeric
+															forceLtr
+															placeholder="0"
+														/>
+													{/snippet}
+												</Field>
+												{#if group.options.length > 1}
+													<Button
+														variant="ghost"
+														size="xs"
+														onclick={() => group.options.splice(optionIndex, 1)}
+														disabled={busy}
+													>
+														×
+													</Button>
+												{/if}
+											</div>
+										{/each}
+
+										<Button
+											variant="ghost"
+											size="xs"
+											onclick={() => {
+												group.options.push({ id: null, name: '', price: '0' });
+												// Keep an "any number" group able to accept everything in it.
+												if (group.max > 1) group.max = group.options.length;
+											}}
+											disabled={busy}
+										>
+											Add a choice
+										</Button>
+									</div>
+								{/each}
+							</div>
 
 							<div class="flex gap-2">
 								<Button variant="primary" onclick={startSave} disabled={busy}>

@@ -23,6 +23,8 @@ export interface LineView {
 	totalMinor: number;
 	taxMinor: number;
 	voided: boolean;
+	/** Options chosen on this line, so the basket shows what the kitchen was told. */
+	modifiers: Array<{ name: string; priceDeltaMinor: number }>;
 }
 
 export interface TaxGroupView {
@@ -234,6 +236,30 @@ export interface PrintOutcome {
 	bytes: number;
 }
 
+/** One choice within a group — "Large", "Oat milk". */
+export interface ModifierOption {
+	id: string;
+	name: string;
+	/** What choosing it adds to **one unit**. Zero and negative are both real. */
+	priceDeltaMinor: number;
+}
+
+/**
+ * A set of choices offered on a product.
+ *
+ * Grouped rather than flat because the two shapes behave differently: "size" is exactly one of
+ * small/medium/large, "extras" is any number. A flat list lets a cashier pick small *and* large.
+ */
+export interface ModifierGroup {
+	id: string;
+	name: string;
+	/** Fewest choices that must be made. One means it cannot be skipped. */
+	min: number;
+	/** Most that may be made. One makes it a single choice. */
+	max: number;
+	options: ModifierOption[];
+}
+
 /** A product as the sell screen and the catalogue screen show it. */
 export interface ProductView {
 	id: string;
@@ -249,6 +275,8 @@ export interface ProductView {
 	taxTreatment: TaxTreatment;
 	category: string | null;
 	active: boolean;
+	/** Choices offered when this is rung, so the sell screen can draw the chooser. */
+	optionGroups: ModifierGroup[];
 }
 
 /** A table as the floor plan shows it. */
@@ -341,6 +369,8 @@ export const till = {
 		 * not, so a rate of zero cannot stand in for either.
 		 */
 		taxTreatment: TaxTreatment;
+		/** Option ids chosen at the till. The till validates them against the product's groups. */
+		chosenOptions: string[];
 		quantityMilli: number;
 		currency: string;
 	}) => call<SaleView>('add_line', input),
@@ -484,6 +514,14 @@ export const till = {
 		taxBasisPoints: number;
 		taxTreatment: TaxTreatment;
 		category?: string | null;
+		/** Ids are absent for anything newly added; the till mints them. */
+		optionGroups: Array<{
+			id: string | null;
+			name: string;
+			min: number;
+			max: number;
+			options: Array<{ id: string | null; name: string; priceDeltaMinor: number }>;
+		}>;
 		pin: string;
 	}) => call<ProductView[]>('save_product', input),
 

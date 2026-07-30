@@ -855,6 +855,47 @@ impl Terminal {
         Ok(())
     }
 
+    /// Turn chosen option ids into the modifiers a line carries.
+    ///
+    /// Validated here rather than trusted from the caller. The UI knows which buttons it drew, but
+    /// the till is what records money — and a required size skipped, or two sizes chosen at once,
+    /// produces a line nobody can price and an order the kitchen cannot make.
+    ///
+    /// The name and delta are *snapshotted* from the catalogue at this moment, so a price change
+    /// tonight cannot alter what a receipt printed this afternoon said.
+    ///
+    /// # Errors
+    /// [`TerminalError::Catalogue`] if the choices do not satisfy the product's groups.
+    pub fn resolve_modifiers(
+        &self,
+        product_id: Uuid,
+        chosen: &[Uuid],
+    ) -> Result<Vec<sahl_core::sale::Modifier>, TerminalError> {
+        let Some(product) = self.catalogue.get(product_id) else {
+            // A product this device has never seen takes no options rather than refusing the sale.
+            // A sibling's catalogue entry can arrive after its first sale does.
+            return Ok(Vec::new());
+        };
+
+        for group in &product.option_groups {
+            group.check(chosen)?;
+        }
+
+        let mut modifiers = Vec::new();
+        for group in &product.option_groups {
+            for id in chosen {
+                if let Some(option) = group.option(*id) {
+                    modifiers.push(sahl_core::sale::Modifier {
+                        option_id: option.id,
+                        name: option.name.clone(),
+                        price_delta: option.price_delta,
+                    });
+                }
+            }
+        }
+        Ok(modifiers)
+    }
+
     /// What this shop sells.
     #[must_use]
     pub const fn catalogue(&self) -> &Catalogue {
@@ -2693,6 +2734,7 @@ mod tests {
             unit,
             tax_class: TaxClass::standard(1500),
             category: Some("Staples".to_owned()),
+            option_groups: Vec::new(),
         }
     }
 
@@ -3034,6 +3076,188 @@ mod tests {
         assert_eq!(
             till.floor().get(seating.table_id).expect("table").label,
             "4"
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Modifiers
+    // ------------------------------------------------------------------------------------------
+
+    fn coffee_with_options() -> sahl_core::catalogue::CatalogueEvent {
+        use sahl_core::catalogue::{ModifierGroup, ModifierOption};
+
+        let money = |minor| Money::from_minor(minor, BDT);
+        sahl_core::catalogue::CatalogueEvent::ProductAdded {
+            product_id: id(12),
+            details: sahl_core::catalogue::ProductDetails {
+                name: "Flat white".to_owned(),
+                sku: None,
+                barcodes: Vec::new(),
+                price: money(32_000),
+                unit: sahl_core::catalogue::Unit::Piece,
+                tax_class: TaxClass::standard(1500),
+                category: Some("Drinks".to_owned()),
+                option_groups: vec![
+                    ModifierGroup {
+                        id: id(100),
+                        name: "Size".to_owned(),
+                        min: 1,
+                        max: 1,
+                        options: vec![
+                            ModifierOption {
+                                id: id(1),
+                                name: "Small".to_owned(),
+                                price_delta: money(0),
+                            },
+                            ModifierOption {
+                                id: id(2),
+                                name: "Large".to_owned(),
+                                price_delta: money(6_000),
+                            },
+                        ],
+                    },
+                    ModifierGroup {
+                        id: id(200),
+                        name: "Extras".to_owned(),
+                        min: 0,
+                        max: 2,
+                        options: vec![
+                            ModifierOption {
+                                id: id(4),
+                                name: "Extra shot".to_owned(),
+                                price_delta: money(5_000),
+                            },
+                            ModifierOption {
+                                id: id(5),
+                                name: "Oat milk".to_owned(),
+                                price_delta: money(3_000),
+                            },
+                        ],
+                    },
+                ],
+            },
+            at: at(0),
+            added_by: id(0x0E),
+        }
+    }
+
+    fn cafe() -> Terminal {
+        let mut till = fresh();
+        till.record_catalogue(&coffee_with_options(), id(60), at(0))
+            .expect("adds");
+        till
+    }
+
+    #[test]
+    fn chosen_options_become_modifiers_with_snapshotted_prices() {
+        let till = cafe();
+        let modifiers = till
+            .resolve_modifiers(id(12), &[id(2), id(4)])
+            .expect("resolves");
+
+        assert_eq!(modifiers.len(), 2);
+        assert_eq!(modifiers[0].name, "Large");
+        assert_eq!(modifiers[0].price_delta, Money::from_minor(6_000, BDT));
+        assert_eq!(modifiers[1].name, "Extra shot");
+    }
+
+    #[test]
+    fn a_required_group_cannot_be_skipped() {
+        // The UI knows which buttons it drew; the till is what records money. A skipped size is a
+        // line nobody can price and an order the kitchen cannot make.
+        let till = cafe();
+        assert!(matches!(
+            till.resolve_modifiers(id(12), &[]),
+            Err(TerminalError::Catalogue(_))
+        ));
+    }
+
+    #[test]
+    fn two_choices_from_a_single_choice_group_are_refused() {
+        let till = cafe();
+        assert!(matches!(
+            till.resolve_modifiers(id(12), &[id(1), id(2)]),
+            Err(TerminalError::Catalogue(_))
+        ));
+    }
+
+    #[test]
+    fn extras_from_another_group_do_not_satisfy_the_required_one() {
+        // A line carries every choice across every group, so each group counts only its own.
+        let till = cafe();
+        assert!(matches!(
+            till.resolve_modifiers(id(12), &[id(4), id(5)]),
+            Err(TerminalError::Catalogue(_))
+        ));
+    }
+
+    #[test]
+    fn a_product_with_no_options_takes_none() {
+        // Retail is the degenerate café here too.
+        let mut till = fresh();
+        till.record_catalogue(
+            &sahl_core::catalogue::CatalogueEvent::ProductAdded {
+                product_id: id(13),
+                details: product_details("Rice 5kg", 48_000, sahl_core::catalogue::Unit::Piece),
+                at: at(0),
+                added_by: id(0x0E),
+            },
+            id(61),
+            at(0),
+        )
+        .expect("adds");
+
+        assert!(
+            till.resolve_modifiers(id(13), &[])
+                .expect("resolves")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unknown_product_takes_no_options_rather_than_refusing_a_sale() {
+        // A sibling's catalogue entry can arrive after its first sale does.
+        let till = cafe();
+        assert!(
+            till.resolve_modifiers(id(0xFFFF), &[])
+                .expect("resolves")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn options_reach_the_money_through_the_line() {
+        // The end of the chain: a chosen option changes what the customer pays.
+        let mut till = cafe();
+        let modifiers = till
+            .resolve_modifiers(id(12), &[id(2), id(4)])
+            .expect("resolves");
+
+        till.record(&opened(), id(80), at(0)).expect("opens");
+        till.record(
+            &SaleEvent::LineAdded {
+                sale_id: id(SALE),
+                line_id: id(11),
+                product_id: id(12),
+                name: "Flat white".to_owned(),
+                unit_price: Money::from_minor(32_000, BDT),
+                quantity: Quantity::from_milli(2_000),
+                tax_class: TaxClass::standard(1500),
+                modifiers,
+            },
+            id(81),
+            at(1),
+        )
+        .expect("adds");
+
+        // 320 base + 60 large + 50 shot = 430 each, twice.
+        assert_eq!(
+            till.sale(id(SALE))
+                .expect("sale")
+                .totals()
+                .expect("totals")
+                .total,
+            Money::from_minor(86_000, BDT)
         );
     }
 }

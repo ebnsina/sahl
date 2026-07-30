@@ -37,6 +37,7 @@
 		type PrintOutcome,
 		type TicketView,
 		type SyncView,
+		type ModifierGroup,
 		type ProductView,
 		type TillStatus
 	} from '$lib/till';
@@ -57,6 +58,10 @@
 	/** Open tickets, so one a cashier navigated away from is reachable again. */
 	let tickets = $state<TicketView[]>([]);
 	let showTickets = $state(false);
+	/** The product whose options are being chosen, if any. */
+	let choosing = $state<ProductView | null>(null);
+	/** Option ids picked so far, across every group. */
+	let chosen = $state<string[]>([]);
 	let printOutcome = $state<PrintOutcome | null>(null);
 	let status = $state<TillStatus | null>(null);
 	let sync = $state<SyncView | null>(null);
@@ -150,6 +155,49 @@
 	function addItem(item: ProductView) {
 		const current = sale;
 		if (!current) return;
+
+		// A product that offers choices cannot be one-tapped: the till refuses a line whose required
+		// groups are unsatisfied, so asking here is the difference between a chooser and an error.
+		if (item.optionGroups.length > 0) {
+			chosen = [];
+			choosing = item;
+			return;
+		}
+		ring(item, []);
+	}
+
+	/** Whether every required group has been satisfied. Mirrors what the till enforces. */
+	function choicesComplete(product: ProductView, picked: string[]): boolean {
+		return product.optionGroups.every((group) => {
+			const count = group.options.filter((option) => picked.includes(option.id)).length;
+			return count >= group.min && count <= group.max;
+		});
+	}
+
+	function toggleChoice(group: ModifierGroup, optionId: string) {
+		if (chosen.includes(optionId)) {
+			chosen = chosen.filter((id) => id !== optionId);
+			return;
+		}
+		if (group.max === 1) {
+			// Single choice: picking one replaces the other rather than erroring afterwards.
+			const others = group.options.map((option) => option.id);
+			chosen = [...chosen.filter((id) => !others.includes(id)), optionId];
+			return;
+		}
+		chosen = [...chosen, optionId];
+	}
+
+	function confirmChoices() {
+		const product = choosing;
+		if (!product) return;
+		ring(product, chosen);
+		choosing = null;
+	}
+
+	function ring(item: ProductView, chosenOptions: string[]) {
+		const current = sale;
+		if (!current) return;
 		void run(
 			() =>
 				till.addLine({
@@ -162,6 +210,7 @@
 					quantityMilli: 1000,
 					taxBasisPoints: item.taxBasisPoints,
 					taxTreatment: item.taxTreatment,
+					chosenOptions,
 					currency: 'BDT'
 				}),
 			(result) => (sale = result)
@@ -399,6 +448,9 @@
 								{/if}
 								{#if item.unit !== 'pcs'}
 									<Badge tone="neutral">per {item.unit}</Badge>
+								{/if}
+								{#if item.optionGroups.length > 0}
+									<Badge tone="primary">Options</Badge>
 								{/if}
 							</div>
 						</button>
@@ -711,6 +763,87 @@
 							</Button>
 						</div>
 					</Card>
+				{/if}
+
+				{#if choosing}
+					{@const product = choosing}
+					<div
+						class="bg-canvas/90 fixed inset-0 z-50 flex items-center justify-center p-6"
+						role="dialog"
+						aria-modal="true"
+						aria-label="Choose options"
+					>
+						<div
+							class="border-border bg-surface flex max-h-[85dvh] w-full max-w-md flex-col border"
+						>
+							<div class="border-border shrink-0 border-b p-4">
+								<p class="label-caps">Options</p>
+								<p class="text-md mt-1">{product.name}</p>
+							</div>
+
+							<div class="min-h-0 flex-1 overflow-y-auto p-4">
+								<div class="flex flex-col gap-4">
+									{#each product.optionGroups as group (group.id)}
+										<div class="flex flex-col gap-2">
+											<div class="flex items-baseline justify-between gap-2">
+												<span class="text-body font-medium">{group.name}</span>
+												<span class="text-secondary text-text-muted">
+													{#if group.min > 0 && group.max === 1}
+														Choose one
+													{:else if group.max === 1}
+														Choose up to one
+													{:else if group.min > 0}
+														Choose {format.integer(group.min)} to {format.integer(group.max)}
+													{:else}
+														Choose up to {format.integer(group.max)}
+													{/if}
+												</span>
+											</div>
+
+											<div class="grid grid-cols-2 gap-2">
+												{#each group.options as option (option.id)}
+													{@const picked = chosen.includes(option.id)}
+													<button
+														type="button"
+														onclick={() => toggleChoice(group, option.id)}
+														class="flex flex-col items-start gap-0.5 border p-2 text-start transition-colors
+											       {picked
+															? 'border-primary bg-primary-subtle'
+															: 'border-border bg-surface hover:bg-surface-hover'}"
+														style="min-height: var(--scale-control-height)"
+													>
+														<span class="text-body">{option.name}</span>
+														{#if option.priceDeltaMinor !== 0}
+															<span class="numeric text-secondary text-text-secondary">
+																{option.priceDeltaMinor > 0 ? '+' : '−'}{format.moneyPlain(
+																	Math.abs(option.priceDeltaMinor)
+																)}
+															</span>
+														{/if}
+													</button>
+												{/each}
+											</div>
+										</div>
+									{/each}
+								</div>
+							</div>
+
+							<div class="border-border flex shrink-0 gap-2 border-t p-4">
+								<Button
+									variant="primary"
+									size="lg"
+									block
+									onclick={confirmChoices}
+									disabled={busy || !choicesComplete(product, chosen)}
+								>
+									Add to sale
+								</Button>
+								<Button variant="ghost" size="lg" onclick={() => (choosing = null)} disabled={busy}>
+									Cancel
+								</Button>
+							</div>
+						</div>
+					</div>
 				{/if}
 
 				{#if pendingVoid}

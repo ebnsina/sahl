@@ -198,6 +198,7 @@ mod tests {
             unit: Unit::Piece,
             tax_class: TaxClass::standard(1500),
             category: Some("Staples".to_owned()),
+            option_groups: Vec::new(),
         }
     }
 

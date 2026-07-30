@@ -25,6 +25,10 @@ pub struct ProductDetails {
     pub unit: Unit,
     pub tax_class: TaxClass,
     pub category: Option<String>,
+    /// Choices offered when this is rung. `default` so events written before options existed still
+    /// deserialize, and their recorded hashes stay valid.
+    #[serde(default)]
+    pub option_groups: Vec<super::options::ModifierGroup>,
 }
 
 /// Everything that happens to the catalogue.
@@ -113,6 +117,7 @@ impl CatalogueEvent {
                     unit: details.unit,
                     tax_class: details.tax_class,
                     category: details.category.clone(),
+                    option_groups: details.option_groups.clone(),
                     active,
                 };
                 product.validate()?;
@@ -151,6 +156,7 @@ mod tests {
             unit: Unit::Piece,
             tax_class: TaxClass::standard(1500),
             category: Some("Staples".to_owned()),
+            option_groups: Vec::new(),
         }
     }
 
