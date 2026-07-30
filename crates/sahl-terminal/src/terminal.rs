@@ -2942,4 +2942,98 @@ mod tests {
         settle(&mut till, 0x100, 11_500);
         assert!(till.occupied_tables().is_empty());
     }
+
+    // ------------------------------------------------------------------------------------------
+    // Open tickets
+    // ------------------------------------------------------------------------------------------
+
+    #[test]
+    fn an_empty_ticket_can_be_abandoned_without_authorisation() {
+        // Empty tickets are debris rather than transactions: nobody rang anything, so there is
+        // nothing to audit and no signal to preserve.
+        let mut till = fresh();
+        till.record(&opened(), id(80), at(0)).expect("opens");
+        assert_eq!(till.book().open().count(), 1);
+
+        till.record(
+            &SaleEvent::Abandoned {
+                sale_id: id(SALE),
+                abandoned_by: id(CASHIER),
+            },
+            id(81),
+            at(1),
+        )
+        .expect("abandons");
+
+        assert_eq!(till.book().open().count(), 0);
+    }
+
+    #[test]
+    fn a_ticket_navigated_away_from_is_still_reachable() {
+        // The bug this closes: a ticket a cashier left stayed open forever, holding items nothing in
+        // the product could reach. Twenty-seven of them had accumulated on a real till.
+        let mut till = fresh();
+        till.record(&opened(), id(80), at(0)).expect("opens");
+        till.record(&line(48_000), id(81), at(1)).expect("adds");
+
+        // "Navigating away" is just not touching it again. The ticket has to survive that.
+        let open: Vec<Uuid> = till.book().open().map(|sale| sale.id()).collect();
+        assert_eq!(open, vec![id(SALE)]);
+        assert_eq!(
+            till.sale(id(SALE))
+                .expect("sale")
+                .totals()
+                .expect("totals")
+                .total,
+            Money::from_minor(48_000, BDT)
+        );
+    }
+
+    #[test]
+    fn abandoning_a_ticket_with_items_is_recorded_not_erased() {
+        // An abandoned basket full of scanned goods is itself a signal an owner should see.
+        let mut till = fresh();
+        till.record(&opened(), id(80), at(0)).expect("opens");
+        till.record(&line(48_000), id(81), at(1)).expect("adds");
+        till.record(
+            &SaleEvent::Abandoned {
+                sale_id: id(SALE),
+                abandoned_by: id(CASHIER),
+            },
+            id(82),
+            at(2),
+        )
+        .expect("abandons");
+
+        let sale = till.sale(id(SALE)).expect("still there");
+        assert_eq!(sale.status(), sahl_core::sale::SaleStatus::Abandoned);
+        assert_eq!(sale.lines().len(), 1, "the evidence survives");
+    }
+
+    #[test]
+    fn a_seated_ticket_appears_with_its_table() {
+        let mut till = fresh();
+        till.record_floor(&table_added(0x7AB1, "4", 4), id(70), at(0))
+            .expect("adds");
+        ring_up(&mut till, 0x100, 11_500);
+        till.record(
+            &SaleEvent::Seated {
+                sale_id: id(0x100),
+                table_id: id(0x7AB1),
+                covers: 2,
+                at: at(3),
+                seated_by: id(CASHIER),
+            },
+            id(71),
+            at(3),
+        )
+        .expect("seats");
+
+        let sale = till.sale(id(0x100)).expect("sale");
+        let seating = sale.seating().expect("seated");
+        assert_eq!(
+            till.floor().get(seating.table_id).expect("table").label,
+            "4"
+        );
+    }
 }

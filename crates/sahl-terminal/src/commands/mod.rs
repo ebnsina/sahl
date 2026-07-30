@@ -1989,3 +1989,123 @@ pub fn seat_sale(
         },
     )
 }
+
+// -------------------------------------------------------------------------------------------
+// Open tickets
+// -------------------------------------------------------------------------------------------
+
+/// An open ticket, as the ticket list shows it.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TicketView {
+    pub sale_id: Uuid,
+    pub line_count: usize,
+    /// `None` for a ticket with nothing on it yet.
+    pub total_minor: Option<i64>,
+    /// The table it is sitting at, for a café.
+    pub table_label: Option<String>,
+    pub covers: Option<u32>,
+    /// Whether another device is holding it. A held ticket cannot be written to from here.
+    pub held_elsewhere: bool,
+}
+
+/// Every ticket still open on this outlet.
+///
+/// Without this, a ticket a cashier navigated away from is unreachable: it stays open forever,
+/// holding items nobody can settle or clear. That is a slow leak in retail and an outright missing
+/// feature in a café, where an open ticket *is* the model.
+#[tauri::command]
+pub fn open_tickets(
+    state: tauri::State<'_, TerminalState>,
+) -> Result<Vec<TicketView>, CommandError> {
+    let terminal = state.inner.lock().map_err(|_| CommandError {
+        code: "poisoned",
+        message: "the till is in an inconsistent state and must be restarted".to_owned(),
+    })?;
+
+    let device = terminal.identity().device_id;
+    let now = now();
+
+    let mut tickets: Vec<TicketView> = terminal
+        .book()
+        .open()
+        .map(|sale| {
+            let seating = sale.seating();
+            TicketView {
+                sale_id: sale.id(),
+                line_count: sale.active_lines().count(),
+                total_minor: sale.totals().ok().map(|totals| totals.total.minor()),
+                table_label: seating.and_then(|seat| {
+                    terminal
+                        .floor()
+                        .get(seat.table_id)
+                        .map(|table| table.label.clone())
+                }),
+                covers: seating.map(|seat| seat.covers),
+                held_elsewhere: matches!(
+                    sale.may_write(device, now),
+                    sahl_core::policy::lease::ClaimVerdict::Held { .. }
+                ),
+            }
+        })
+        .collect();
+
+    // Fullest first. A ticket with items is a customer waiting; an empty one is debris.
+    tickets.sort_by(|a, b| {
+        b.total_minor
+            .unwrap_or_default()
+            .cmp(&a.total_minor.unwrap_or_default())
+            .then(a.sale_id.cmp(&b.sale_id))
+    });
+    Ok(tickets)
+}
+
+/// Abandon every open ticket that has nothing on it.
+///
+/// Empty tickets are debris rather than transactions — nobody rang anything, so there is nothing to
+/// audit and no signal to preserve. Tickets *with* lines are never touched here: an abandoned basket
+/// full of scanned goods is itself something an owner should see, so it has to be abandoned
+/// deliberately and attributed to someone.
+#[tauri::command]
+pub fn discard_empty_tickets(
+    state: tauri::State<'_, TerminalState>,
+    abandoned_by: Uuid,
+) -> Result<usize, CommandError> {
+    let empty: Vec<Uuid> = {
+        let terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+
+        terminal
+            .book()
+            .open()
+            .filter(|sale| sale.active_lines().count() == 0)
+            .map(sahl_core::sale::Sale::id)
+            .collect()
+    };
+
+    let mut discarded = 0_usize;
+    for sale_id in empty {
+        let mut terminal = state.inner.lock().map_err(|_| CommandError {
+            code: "poisoned",
+            message: "the till is in an inconsistent state and must be restarted".to_owned(),
+        })?;
+
+        if terminal
+            .record(
+                &SaleEvent::Abandoned {
+                    sale_id,
+                    abandoned_by,
+                },
+                new_id(),
+                now(),
+            )
+            .is_ok()
+        {
+            discarded = discarded.saturating_add(1);
+        }
+    }
+
+    Ok(discarded)
+}

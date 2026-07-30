@@ -11,6 +11,7 @@
 	 */
 	import Ban from '@lucide/svelte/icons/ban';
 	import Printer from '@lucide/svelte/icons/printer';
+	import ReceiptText from '@lucide/svelte/icons/receipt-text';
 	import Banknote from '@lucide/svelte/icons/banknote';
 	import Check from '@lucide/svelte/icons/check';
 	import Plus from '@lucide/svelte/icons/plus';
@@ -34,6 +35,7 @@
 		type SaleView,
 		type DocumentView,
 		type PrintOutcome,
+		type TicketView,
 		type SyncView,
 		type ProductView,
 		type TillStatus
@@ -52,6 +54,9 @@
 	/** Why a challan could not be issued. Surfaced, never allowed to block the sale. */
 	let documentProblem = $state<string | null>(null);
 	let hasPrinter = $state(false);
+	/** Open tickets, so one a cashier navigated away from is reachable again. */
+	let tickets = $state<TicketView[]>([]);
+	let showTickets = $state(false);
 	let printOutcome = $state<PrintOutcome | null>(null);
 	let status = $state<TillStatus | null>(null);
 	let sync = $state<SyncView | null>(null);
@@ -75,6 +80,7 @@
 			onDone?.(result);
 			status = await till.status();
 			sync = await till.syncStatus();
+			tickets = await till.openTickets();
 		} catch (thrown) {
 			error = asTillError(thrown);
 			if (error.code === 'no_till') available = false;
@@ -95,8 +101,38 @@
 				() => till.sellableProducts(),
 				(result) => (catalogue = result)
 			);
+			void refreshTickets();
 		}
 	});
+
+	async function refreshTickets() {
+		try {
+			tickets = await till.openTickets();
+		} catch {
+			// A ticket list that cannot load must not stop someone selling.
+			tickets = [];
+		}
+	}
+
+	function resumeTicket(saleId: string) {
+		void run(
+			() => till.getSale(saleId),
+			(result) => {
+				sale = result;
+				showTickets = false;
+				cashInput = '';
+				document = null;
+				documentProblem = null;
+			}
+		);
+	}
+
+	function discardEmpty() {
+		void run(
+			() => till.discardEmptyTickets(CASHIER),
+			() => void refreshTickets()
+		);
+	}
 
 	function startSale() {
 		document = null;
@@ -274,6 +310,16 @@
 				{:else}
 					<Badge tone="success" dot>Synced</Badge>
 				{/if}
+				{#if tickets.length > 0}
+					<Button
+						variant="ghost"
+						size="xs"
+						icon={ReceiptText}
+						onclick={() => (showTickets = !showTickets)}
+					>
+						{format.integer(tickets.length)} open
+					</Button>
+				{/if}
 				<span class="label-caps">Takings</span>
 				<Numeric value={format.money(status.takingsMinor)} class="font-semibold" />
 			{/if}
@@ -361,6 +407,57 @@
 			</Card>
 
 			<div class="flex min-h-0 flex-col gap-3">
+				{#if showTickets}
+					<Card label="Open tickets" flush>
+						<div class="max-h-64 overflow-y-auto">
+							{#each tickets as ticket (ticket.saleId)}
+								<button
+									type="button"
+									disabled={busy || ticket.heldElsewhere}
+									onclick={() => resumeTicket(ticket.saleId)}
+									class="border-border hover:bg-surface-hover flex w-full items-center gap-3 border-b
+									       px-3 text-start disabled:cursor-not-allowed disabled:opacity-50"
+									style="min-height: var(--scale-row-height)"
+								>
+									<div class="min-w-0 flex-1">
+										<p class="text-body truncate">
+											{#if ticket.tableLabel}
+												Table {ticket.tableLabel}
+											{:else if ticket.lineCount === 0}
+												Empty ticket
+											{:else}
+												{format.integer(ticket.lineCount)} items
+											{/if}
+										</p>
+										{#if ticket.covers !== null}
+											<p class="text-secondary text-text-muted">
+												{format.integer(ticket.covers)} covers
+											</p>
+										{/if}
+									</div>
+									{#if ticket.heldElsewhere}
+										<Badge tone="offline" dot>On another till</Badge>
+									{/if}
+									{#if ticket.totalMinor !== null}
+										<Numeric value={format.moneyPlain(ticket.totalMinor)} />
+									{/if}
+								</button>
+							{/each}
+						</div>
+
+						{#if tickets.some((ticket) => ticket.lineCount === 0)}
+							<div class="border-border border-t p-3">
+								<!-- Empty tickets are debris: nobody rang anything, so there is nothing to audit.
+								     Tickets holding items are never cleared this way — an abandoned basket full
+								     of scanned goods is itself a signal an owner should see. -->
+								<Button variant="ghost" size="sm" onclick={discardEmpty} disabled={busy}>
+									Clear the empty ones
+								</Button>
+							</div>
+						{/if}
+					</Card>
+				{/if}
+
 				<Card
 					label="Sale"
 					flush

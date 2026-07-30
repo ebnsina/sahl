@@ -20,6 +20,12 @@
 )]
 
 pub mod commands;
+/// A loopback HTTP view of the till, for development only.
+///
+/// Debug builds exclusively, and even then only when `SAHL_DEV_BRIDGE=1`. See the module note for
+/// why this is not the browser fallback the architecture forbids.
+#[cfg(debug_assertions)]
+pub mod devbridge;
 pub mod enrollment;
 pub mod printer;
 pub mod store;
@@ -106,6 +112,10 @@ pub fn run() {
             }
             tauri::Manager::manage(app, printer);
 
+            // Development only, and off unless asked for. Never present in a release build.
+            #[cfg(debug_assertions)]
+            devbridge::spawn(std::sync::Arc::clone(&shared));
+
             tauri::Manager::manage(app, TerminalState::from_shared(shared));
             Ok(())
         })
@@ -154,6 +164,8 @@ pub fn run() {
             commands::save_table,
             commands::set_table_active,
             commands::seat_sale,
+            commands::open_tickets,
+            commands::discard_empty_tickets,
         ])
         .run(tauri::generate_context!())
         .expect("the till could not start");

@@ -264,6 +264,18 @@ export interface TableView {
 	covers: number | null;
 }
 
+/** An open ticket, as the ticket list shows it. */
+export interface TicketView {
+	saleId: string;
+	lineCount: number;
+	/** `null` for a ticket with nothing on it yet. */
+	totalMinor: number | null;
+	tableLabel: string | null;
+	covers: number | null;
+	/** Another device is holding it; it cannot be written to from here. */
+	heldElsewhere: boolean;
+}
+
 /** Live sync state. `disabled` is normal for a shop with no server configured. */
 export type SyncView =
 	| { state: 'disabled' }
@@ -355,6 +367,13 @@ export const till = {
 		call<SaleView>('abandon_sale', { saleId, abandonedBy }),
 
 	getSale: (saleId: string) => call<SaleView>('get_sale', { saleId }),
+
+	/** Every ticket still open on this outlet. Without this they are unreachable. */
+	openTickets: () => call<TicketView[]>('open_tickets'),
+
+	/** Abandon tickets with nothing on them. Never touches one holding items. */
+	discardEmptyTickets: (abandonedBy: string) =>
+		call<number>('discard_empty_tickets', { abandonedBy }),
 
 	status: () => call<TillStatus>('till_status'),
 
